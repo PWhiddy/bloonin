@@ -10,6 +10,8 @@ void ov5640_demo_run(void) {
     ov5640_config_t config;
     ov5640_t camera;
     ov5640_get_default_config(&config);
+    config.sda_pin = 4;
+    config.scl_pin = 5;
     // lower clock to mitigate wire interference
     config.mclk_frequency = 10000000;
     printf("construct camera\n");
