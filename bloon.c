@@ -47,7 +47,8 @@ int main() {
     stdio_init_all();
 
     // monitor gps
-    c90770_uart_monitor_gps();
+    //c90770_uart_monitor_gps();
+    c90770_uart_monitor_gps_parsed();    
 
     ov5640_demo_run();
 
