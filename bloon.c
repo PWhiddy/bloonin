@@ -5,6 +5,7 @@
  */
 
 #include "pico/stdlib.h"
+#include "c90770_uart.h"
 #include "ov5640_demo.h"
 
 // Pico W devices use a GPIO on the WIFI chip for the LED,
@@ -44,6 +45,9 @@ void pico_set_led(bool led_on) {
 
 int main() {
     stdio_init_all();
+
+    // monitor gps
+    c90770_uart_monitor_gps();
 
     ov5640_demo_run();
 
