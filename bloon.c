@@ -6,6 +6,7 @@
 
 #include "pico/stdlib.h"
 #include "c90770_uart.h"
+#include "si5351a_ic2.h"
 #include "ov5640_demo.h"
 
 // Pico W devices use a GPIO on the WIFI chip for the LED,
@@ -45,6 +46,15 @@ void pico_set_led(bool led_on) {
 
 int main() {
     stdio_init_all();
+
+    si5351a_i2c_t clock;
+    if (!si5351a_i2c_start_28_1262_mhz(&clock)) {
+        sleep_ms(5000);
+        printf("Si5351A init failed\n");
+    } else {
+        sleep_ms(5000);
+        printf("no error while doing Si5351A init");
+    }
 
     // monitor gps
     //c90770_uart_monitor_gps();
