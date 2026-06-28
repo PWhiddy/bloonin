@@ -6,7 +6,7 @@
 
 #include "pico/stdlib.h"
 #include "c90770_uart.h"
-#include "si5351a_ic2.h"
+#include "si5351a_i2c.h"
 #include "ov5640_demo.h"
 
 // Pico W devices use a GPIO on the WIFI chip for the LED,

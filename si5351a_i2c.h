@@ -21,11 +21,11 @@
 #endif
 
 #ifndef SI5351A_I2C_SDA_GPIO
-#define SI5351A_I2C_SDA_GPIO 4u
+#define SI5351A_I2C_SDA_GPIO 0u
 #endif
 
 #ifndef SI5351A_I2C_SCL_GPIO
-#define SI5351A_I2C_SCL_GPIO 5u
+#define SI5351A_I2C_SCL_GPIO 1u
 #endif
 
 #ifndef SI5351A_I2C_BAUD
