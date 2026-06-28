@@ -47,13 +47,23 @@ void pico_set_led(bool led_on) {
 int main() {
     stdio_init_all();
 
+    sleep_ms(5000);
+    si5351a_i2c_scan_default_bus();
+
     si5351a_i2c_t clock;
     if (!si5351a_i2c_start_28_1262_mhz(&clock)) {
-        sleep_ms(5000);
-        printf("Si5351A init failed\n");
+        printf(
+            "Si5351A init failed: %s, reg=0x%02x, status=0x%02x, addr=0x%02x, i2c=%p, sda_gpio=%u, scl_gpio=%u\n",
+            si5351a_i2c_error_string(clock.last_error),
+            clock.last_reg,
+            clock.last_status,
+            clock.i2c_addr,
+            clock.i2c,
+            clock.sda_gpio,
+            clock.scl_gpio
+        );
     } else {
-        sleep_ms(5000);
-        printf("no error while doing Si5351A init");
+        printf("no error while doing Si5351A init\n");
     }
 
     // monitor gps
