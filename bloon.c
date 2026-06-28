@@ -53,17 +53,18 @@ int main() {
     si5351a_i2c_t clock;
     if (!si5351a_i2c_start_28_1262_mhz(&clock)) {
         printf(
-            "Si5351A init failed: %s, reg=0x%02x, status=0x%02x, addr=0x%02x, i2c=%p, sda_gpio=%u, scl_gpio=%u\n",
+            "Si5351A init failed: %s, reg=0x%02x, status=0x%02x, addr=0x%02x, i2c=%p, sda_gpio=%u, scl_gpio=%u, power_enable_gpio=%u\n",
             si5351a_i2c_error_string(clock.last_error),
             clock.last_reg,
             clock.last_status,
             clock.i2c_addr,
             clock.i2c,
             clock.sda_gpio,
-            clock.scl_gpio
+            clock.scl_gpio,
+            clock.power_enable_gpio
         );
     } else {
-        printf("no error while doing Si5351A init\n");
+        printf("Si5351A init OK\n");
     }
 
     // monitor gps

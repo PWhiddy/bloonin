@@ -36,6 +36,10 @@
 #define SI5351A_READY_TIMEOUT_US 100000u
 #endif
 
+#ifndef SI5351A_POWER_ENABLE_GPIO
+#define SI5351A_POWER_ENABLE_GPIO 28u
+#endif
+
 #define SI5351A_OUTPUT_HZ 28126200u
 
 typedef enum {
@@ -72,6 +76,7 @@ typedef struct {
     uint8_t i2c_addr;
     uint sda_gpio;
     uint scl_gpio;
+    uint power_enable_gpio;
     uint32_t baudrate;
     si5351a_error_t last_error;
     uint8_t last_reg;
@@ -147,7 +152,16 @@ static inline bool si5351a_i2c_wait_ready(si5351a_i2c_t *clock, uint32_t timeout
     return false;
 }
 
+static inline void si5351a_i2c_enable_power(void) {
+    gpio_init(SI5351A_POWER_ENABLE_GPIO);
+    gpio_set_dir(SI5351A_POWER_ENABLE_GPIO, GPIO_OUT);
+    gpio_put(SI5351A_POWER_ENABLE_GPIO, false);
+    sleep_ms(10);
+}
+
 static inline void si5351a_i2c_scan_bus(i2c_inst_t *i2c, uint sda_gpio, uint scl_gpio, uint32_t baudrate) {
+    si5351a_i2c_enable_power();
+
     i2c_init(i2c, baudrate);
     gpio_set_function(sda_gpio, GPIO_FUNC_I2C);
     gpio_set_function(scl_gpio, GPIO_FUNC_I2C);
@@ -204,10 +218,13 @@ static inline void si5351a_i2c_init_bus(
     clock->i2c_addr = i2c_addr;
     clock->sda_gpio = sda_gpio;
     clock->scl_gpio = scl_gpio;
+    clock->power_enable_gpio = SI5351A_POWER_ENABLE_GPIO;
     clock->baudrate = baudrate;
     clock->last_error = SI5351A_ERROR_NONE;
     clock->last_reg = 0u;
     clock->last_status = 0u;
+
+    si5351a_i2c_enable_power();
 
     i2c_init(i2c, baudrate);
     gpio_set_function(sda_gpio, GPIO_FUNC_I2C);
