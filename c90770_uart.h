@@ -1,3 +1,5 @@
+// communicate with gps module via uart
+
 #ifndef C90770_UART_H
 #define C90770_UART_H
 
