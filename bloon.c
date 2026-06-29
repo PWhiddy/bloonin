@@ -51,7 +51,8 @@ int main() {
     si5351a_i2c_scan_default_bus();
 
     si5351a_i2c_t clock;
-    if (!si5351a_i2c_start_28_1262_mhz(&clock)) {
+    int clock_output_hz = 28126200u;
+    if (!si5351a_i2c_start_output_hz(&clock, clock_output_hz)) {
         printf(
             "Si5351A init failed: %s, reg=0x%02x, status=0x%02x, addr=0x%02x, i2c=%p, sda_gpio=%u, scl_gpio=%u, power_enable_gpio=%u\n",
             si5351a_i2c_error_string(clock.last_error),

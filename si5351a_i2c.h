@@ -65,6 +65,7 @@ typedef enum {
     SI5351A_ERROR_CLK0_CONTROL_FAILED,
     SI5351A_ERROR_PLL_RESET_FAILED,
     SI5351A_ERROR_ENABLE_CLK0_FAILED,
+    SI5351A_ERROR_INVALID_OUTPUT_FREQUENCY,
 } si5351a_error_t;
 
 #ifndef SI5351A_CLK0_DRIVE
@@ -206,6 +207,60 @@ static inline bool si5351a_i2c_write_multisynth(
     return si5351a_i2c_write_regs(clock, base_reg, values, sizeof(values));
 }
 
+static inline uint32_t si5351a_i2c_gcd_u32(uint32_t a, uint32_t b) {
+    while (b != 0u) {
+        uint32_t t = b;
+        b = a % b;
+        a = t;
+    }
+
+    return a;
+}
+
+static inline bool si5351a_i2c_multisynth_from_frequency(
+    uint32_t output_hz,
+    uint32_t *p1,
+    uint32_t *p2,
+    uint32_t *p3
+) {
+    static const uint32_t pll_hz = 900000000u;
+    static const uint32_t max_denominator = 1048575u;
+
+    if (output_hz < 1000000u || output_hz > 112500000u) {
+        return false;
+    }
+
+    uint32_t a = pll_hz / output_hz;
+    uint32_t rem = pll_hz % output_hz;
+    if (a < 8u || a > 900u) {
+        return false;
+    }
+
+    uint32_t b = 0u;
+    uint32_t c = 1u;
+    if (rem != 0u) {
+        uint32_t gcd = si5351a_i2c_gcd_u32(rem, output_hz);
+        b = rem / gcd;
+        c = output_hz / gcd;
+
+        if (c > max_denominator) {
+            c = max_denominator;
+            b = (uint32_t)(((uint64_t)rem * c + (output_hz / 2u)) / output_hz);
+            if (b >= c) {
+                ++a;
+                b = 0u;
+                c = 1u;
+            }
+        }
+    }
+
+    uint32_t div = (128u * b) / c;
+    *p1 = 128u * a + div - 512u;
+    *p2 = 128u * b - c * div;
+    *p3 = c;
+    return true;
+}
+
 static inline void si5351a_i2c_init_bus(
     si5351a_i2c_t *clock,
     i2c_inst_t *i2c,
@@ -244,15 +299,18 @@ static inline void si5351a_i2c_init_default_bus(si5351a_i2c_t *clock) {
     );
 }
 
-static inline bool si5351a_i2c_configure_28_1262_mhz(si5351a_i2c_t *clock) {
+static inline bool si5351a_i2c_configure_output_hz(si5351a_i2c_t *clock, uint32_t output_hz) {
     static const uint32_t plla_p1 = 4096u;   // 25 MHz crystal * 36 = 900 MHz PLLA.
     static const uint32_t plla_p2 = 0u;
     static const uint32_t plla_p3 = 1u;
 
-    // 900 MHz / (31 + 46813 / 46877) = 28.1262 MHz.
-    static const uint32_t ms0_p1 = 3583u;
-    static const uint32_t ms0_p2 = 38685u;
-    static const uint32_t ms0_p3 = 46877u;
+    uint32_t ms0_p1 = 0u;
+    uint32_t ms0_p2 = 0u;
+    uint32_t ms0_p3 = 0u;
+    if (!si5351a_i2c_multisynth_from_frequency(output_hz, &ms0_p1, &ms0_p2, &ms0_p3)) {
+        si5351a_i2c_set_error(clock, SI5351A_ERROR_INVALID_OUTPUT_FREQUENCY, 0u);
+        return false;
+    }
 
     if (!si5351a_i2c_wait_ready(clock, SI5351A_READY_TIMEOUT_US)) {
         return false;
@@ -311,7 +369,12 @@ static inline bool si5351a_i2c_configure_28_1262_mhz(si5351a_i2c_t *clock) {
 
 static inline bool si5351a_i2c_start_28_1262_mhz(si5351a_i2c_t *clock) {
     si5351a_i2c_init_default_bus(clock);
-    return si5351a_i2c_configure_28_1262_mhz(clock);
+    return si5351a_i2c_configure_output_hz(clock, SI5351A_OUTPUT_HZ);
+}
+
+static inline bool si5351a_i2c_start_output_hz(si5351a_i2c_t *clock, uint32_t output_hz) {
+    si5351a_i2c_init_default_bus(clock);
+    return si5351a_i2c_configure_output_hz(clock, output_hz);
 }
 
 static inline const char *si5351a_i2c_error_string(si5351a_error_t error) {
@@ -346,6 +409,8 @@ static inline const char *si5351a_i2c_error_string(si5351a_error_t error) {
             return "failed to reset Si5351A PLLA";
         case SI5351A_ERROR_ENABLE_CLK0_FAILED:
             return "failed to enable Si5351A CLK0 output";
+        case SI5351A_ERROR_INVALID_OUTPUT_FREQUENCY:
+            return "invalid Si5351A output frequency for current PLL setup";
         default:
             return "unknown Si5351A error";
     }
