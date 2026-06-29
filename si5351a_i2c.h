@@ -377,6 +377,37 @@ static inline bool si5351a_i2c_start_output_hz(si5351a_i2c_t *clock, uint32_t ou
     return si5351a_i2c_configure_output_hz(clock, output_hz);
 }
 
+static inline bool si5351a_i2c_power_cycle_down_sweep(si5351a_i2c_t *clock, uint32_t original_output_hz) {
+    static const uint32_t decrement_hz = 10000u;
+    static const uint32_t minimum_hz = 26800000u;
+    static const uint32_t on_ms = 250u;
+    static const uint32_t off_ms = 250u;
+    static const uint32_t cycles_per_step = 6u;
+
+    uint32_t output_hz = original_output_hz;
+    while (true) {
+        for (uint32_t cycle = 0u; cycle < cycles_per_step; ++cycle) {
+            gpio_put(clock->power_enable_gpio, false);
+            sleep_ms(10);
+
+            if (!si5351a_i2c_configure_output_hz(clock, output_hz)) {
+                return false;
+            }
+
+            sleep_ms(on_ms - 10u);
+            gpio_put(clock->power_enable_gpio, true);
+            sleep_ms(off_ms);
+        }
+
+        if (output_hz < minimum_hz + decrement_hz) {
+            output_hz = original_output_hz;
+        } else {
+            output_hz -= decrement_hz;
+        }
+        printf("now using freq: %.4f mhz\n", output_hz / 1000000.0);
+    }
+}
+
 static inline const char *si5351a_i2c_error_string(si5351a_error_t error) {
     switch (error) {
         case SI5351A_ERROR_NONE:

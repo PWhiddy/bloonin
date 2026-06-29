@@ -51,8 +51,9 @@ int main() {
     si5351a_i2c_scan_default_bus();
 
     si5351a_i2c_t clock;
-    int clock_output_hz = 28126200u;
-    if (!si5351a_i2c_start_output_hz(&clock, clock_output_hz)) {
+    int clock_output_hz_ideal = 28126200u;
+    int clock_output_hz_comp  = 27400000u;
+    if (!si5351a_i2c_start_output_hz(&clock, clock_output_hz_ideal)) {
         printf(
             "Si5351A init failed: %s, reg=0x%02x, status=0x%02x, addr=0x%02x, i2c=%p, sda_gpio=%u, scl_gpio=%u, power_enable_gpio=%u\n",
             si5351a_i2c_error_string(clock.last_error),
@@ -66,6 +67,10 @@ int main() {
         );
     } else {
         printf("Si5351A init OK\n");
+    }
+
+    if (!si5351a_i2c_power_cycle_down_sweep(&clock, clock_output_hz_comp)) {
+        printf("error doing signal sweep");
     }
 
     // monitor gps
