@@ -29,7 +29,7 @@
 #endif
 
 #ifndef SI5351A_I2C_BAUD
-#define SI5351A_I2C_BAUD 100000u
+#define SI5351A_I2C_BAUD 400000u
 #endif
 
 #ifndef SI5351A_READY_TIMEOUT_US
@@ -262,6 +262,90 @@ static inline bool si5351a_i2c_multisynth_from_frequency(
     *p2 = 128u * b - c * div;
     *p3 = c;
     return true;
+}
+
+/*
+ * Calculate a MultiSynth divider for output_numerator / output_denominator Hz.
+ * WSPR needs 1.46484375 Hz tone steps, so its tone frequencies cannot be
+ * represented by the whole-Hz interface above.  The Si5351A fractional divider
+ * is limited to a 20-bit denominator; rounding to that limit is unavoidable
+ * and is considerably more accurate than rounding the requested RF frequency
+ * to a whole hertz.
+ */
+static inline bool si5351a_i2c_multisynth_from_frequency_ratio(
+    uint64_t output_numerator,
+    uint32_t output_denominator,
+    uint32_t *p1,
+    uint32_t *p2,
+    uint32_t *p3
+) {
+    static const uint64_t pll_hz = 900000000u;
+    static const uint32_t max_denominator = 1048575u;
+
+    if (output_numerator == 0u || output_denominator == 0u) {
+        return false;
+    }
+
+    uint64_t divider_numerator = pll_hz * output_denominator;
+    uint64_t a = divider_numerator / output_numerator;
+    uint64_t rem = divider_numerator % output_numerator;
+    if (a < 8u || a > 900u) {
+        return false;
+    }
+
+    uint64_t b = 0u;
+    uint64_t c = 1u;
+    if (rem != 0u) {
+        uint64_t reduced_denominator = output_numerator;
+        uint64_t reduced_remainder = rem;
+        while (reduced_remainder != 0u) {
+            uint64_t t = reduced_remainder;
+            reduced_remainder = reduced_denominator % reduced_remainder;
+            reduced_denominator = t;
+        }
+        b = rem / reduced_denominator;
+        c = output_numerator / reduced_denominator;
+
+        if (c > max_denominator) {
+            c = max_denominator;
+            b = (rem * c + (output_numerator / 2u)) / output_numerator;
+            if (b >= c) {
+                ++a;
+                b = 0u;
+                c = 1u;
+            }
+        }
+    }
+
+    uint64_t div = (128u * b) / c;
+    *p1 = (uint32_t)(128u * a + div - 512u);
+    *p2 = (uint32_t)(128u * b - c * div);
+    *p3 = (uint32_t)c;
+    return true;
+}
+
+/* Update CLK0's divider only.  Do not disable outputs or reset PLLA here:
+ * WSPR changes tone every 682.667 ms and doing either creates a visible gap
+ * at every symbol boundary. */
+static inline bool si5351a_i2c_update_clk0_frequency_ratio(
+    si5351a_i2c_t *clock,
+    uint64_t output_numerator,
+    uint32_t output_denominator
+) {
+    uint32_t p1 = 0u;
+    uint32_t p2 = 0u;
+    uint32_t p3 = 0u;
+    if (!si5351a_i2c_multisynth_from_frequency_ratio(
+            output_numerator, output_denominator, &p1, &p2, &p3)) {
+        si5351a_i2c_set_error(clock, SI5351A_ERROR_INVALID_OUTPUT_FREQUENCY, 42u);
+        return false;
+    }
+    return si5351a_i2c_write_multisynth(clock, 42u, p1, p2, p3, 0u, false);
+}
+
+static inline bool si5351a_i2c_set_clk0_enabled(si5351a_i2c_t *clock, bool enabled) {
+    /* CLK1 is left as configured; this project uses CLK0 as the RF output. */
+    return si5351a_i2c_write_reg(clock, 3u, enabled ? 0xfcu : 0xfdu);
 }
 
 static inline void si5351a_i2c_init_bus(

@@ -7,6 +7,7 @@
 #include "pico/stdlib.h"
 #include "c90770_uart.h"
 #include "si5351a_i2c.h"
+#include "wspr.h"
 #include "ov5640_demo.h"
 
 // Pico W devices use a GPIO on the WIFI chip for the LED,
@@ -46,6 +47,10 @@ void pico_set_led(bool led_on) {
 
 int main() {
     stdio_init_all();
+
+    /* This loop does not return.  Keeping it first protects WSPR symbol timing
+     * from the scan, sweep, GPS monitor, camera demo, and LED code below. */
+    wspr_run_10m_beacon();
 
     sleep_ms(5000);
     si5351a_i2c_scan_default_bus();

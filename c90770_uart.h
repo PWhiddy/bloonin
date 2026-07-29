@@ -140,6 +140,14 @@ typedef struct {
     int satellites_used;
     char fix_source[4];
 
+    /* UTC from a valid RMC sentence.  The capture timestamp lets callers
+     * schedule a radio frame between NMEA sentences without an RTC. */
+    bool have_utc_time;
+    uint8_t utc_hour;
+    uint8_t utc_minute;
+    uint8_t utc_second;
+    absolute_time_t utc_captured_at;
+
     uint32_t last_satellite_hash;
     uint32_t last_fix_hash;
     uint32_t checksum_failures;
@@ -487,6 +495,24 @@ static inline void c90770_handle_rmc(c90770_gps_monitor_state_t *state, char **f
     }
 
     bool valid = fields[2][0] == 'A';
+    if (valid && strlen(fields[1]) >= 6u &&
+        fields[1][0] >= '0' && fields[1][0] <= '9' &&
+        fields[1][1] >= '0' && fields[1][1] <= '9' &&
+        fields[1][2] >= '0' && fields[1][2] <= '9' &&
+        fields[1][3] >= '0' && fields[1][3] <= '9' &&
+        fields[1][4] >= '0' && fields[1][4] <= '9' &&
+        fields[1][5] >= '0' && fields[1][5] <= '9') {
+        uint8_t hour = (uint8_t)(10u * (fields[1][0] - '0') + fields[1][1] - '0');
+        uint8_t minute = (uint8_t)(10u * (fields[1][2] - '0') + fields[1][3] - '0');
+        uint8_t second = (uint8_t)(10u * (fields[1][4] - '0') + fields[1][5] - '0');
+        if (hour < 24u && minute < 60u && second < 60u) {
+            state->have_utc_time = true;
+            state->utc_hour = hour;
+            state->utc_minute = minute;
+            state->utc_second = second;
+            state->utc_captured_at = get_absolute_time();
+        }
+    }
     if (valid && fields[3][0] != '\0' && fields[5][0] != '\0') {
         state->latitude_degrees = c90770_nmea_coordinate_to_degrees(fields[3], fields[4]);
         state->longitude_degrees = c90770_nmea_coordinate_to_degrees(fields[5], fields[6]);
