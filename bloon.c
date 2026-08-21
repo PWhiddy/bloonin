@@ -50,6 +50,12 @@ int main() {
     sleep_ms(5000);
     /* This loop does not return.  Keeping it first protects WSPR symbol timing
      * from the scan, sweep, GPS monitor, camera demo, and LED code below. */
+
+    int myChar;
+    printf("waiting for start sig: \n");
+    myChar = getchar();
+    printf("got: %d", myChar);
+
     wspr_run_10m_beacon();
 
     si5351a_i2c_scan_default_bus();
