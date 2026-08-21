@@ -20,7 +20,11 @@
 #define WSPR_SYMBOL_COUNT 162u
 #define WSPR_SYMBOL_PERIOD_NUMERATOR_US 8192000000ull
 #define WSPR_SYMBOL_PERIOD_DENOMINATOR 12000u
-#define WSPR_10M_DIAL_HZ 28126100u
+#define WSPR_10M_DIAL_HZ 27043909
+// 27044000
+// 27044700
+// 27026100u 
+//28126100u // WANT
 #define WSPR_TONE_DENOMINATOR 256u
 #define WSPR_TONE_STEP_NUMERATOR 375u
 
@@ -34,6 +38,12 @@
 #endif
 #ifndef WSPR_POWER_DBM
 #define WSPR_POWER_DBM 10u
+#endif
+
+/* Keep the beacon usable on the bench without a GPS fix.  Set this to 0 for
+ * normal operation, where UTC and the Maidenhead grid come from the GPS. */
+#ifndef TEST_GPS_MODE
+#define TEST_GPS_MODE 1
 #endif
 
 static inline uint8_t wspr_parity32(uint32_t value) {
@@ -212,6 +222,13 @@ static inline bool wspr_transmit_10m_at(
     uint8_t power_dbm,
     absolute_time_t start
 ) {
+    /* Establish and report a known-safe state before preparing the frame. */
+    if (!si5351a_i2c_set_clk0_enabled(clock, false)) {
+        printf("WSPR RF STATE: UNKNOWN (failed to disable CLK0)\n");
+        return false;
+    }
+    printf("WSPR RF STATE: NOT TRANSMITTING (waiting for frame start)\n");
+
     uint8_t symbols[WSPR_SYMBOL_COUNT];
     if (!wspr_encode(callsign, grid, power_dbm, symbols)) {
         return false;
@@ -229,14 +246,13 @@ static inline bool wspr_transmit_10m_at(
         return false;
     }
 
-    /* Do not radiate the first tone while waiting for the UTC slot. */
-    if (!si5351a_i2c_set_clk0_enabled(clock, false)) {
-        return false;
-    }
+    /* Enable ten milliseconds early so logging completes before symbol zero. */
     sleep_until(delayed_by_us(start, -10000));
     if (!si5351a_i2c_set_clk0_enabled(clock, true)) {
+        printf("WSPR RF STATE: UNKNOWN (failed to enable CLK0)\n");
         return false;
     }
+    printf("WSPR RF STATE: TRANSMITTING\n");
 
     for (uint32_t i = 0u; i < WSPR_SYMBOL_COUNT; ++i) {
         uint64_t offset_us = ((uint64_t)i * WSPR_SYMBOL_PERIOD_NUMERATOR_US) /
@@ -250,7 +266,7 @@ static inline bool wspr_transmit_10m_at(
             uint32_t next_p3 = 0u;
             if (!si5351a_i2c_multisynth_from_frequency_ratio(
                     frequency, WSPR_TONE_DENOMINATOR, &next_p1, &next_p2, &next_p3)) {
-                return false;
+                goto abort_transmission;
             }
             if (next_p1 == current_p1 && next_p3 == current_p3) {
                 /* Only P2 changes for the four 10 m WSPR tones.  Updating
@@ -261,10 +277,10 @@ static inline bool wspr_transmit_10m_at(
                     (uint8_t)(next_p2 & 0xffu),
                 };
                 if (!si5351a_i2c_write_regs(clock, 47u, p2_registers, sizeof(p2_registers))) {
-                    return false;
+                    goto abort_transmission;
                 }
             } else if (!si5351a_i2c_write_multisynth(clock, 42u, next_p1, next_p2, next_p3, 0u, false)) {
-                return false;
+                goto abort_transmission;
             }
             current_p1 = next_p1;
             current_p3 = next_p3;
@@ -273,7 +289,20 @@ static inline bool wspr_transmit_10m_at(
     uint64_t frame_us = ((uint64_t)WSPR_SYMBOL_COUNT * WSPR_SYMBOL_PERIOD_NUMERATOR_US) /
                         WSPR_SYMBOL_PERIOD_DENOMINATOR;
     sleep_until(delayed_by_us(start, (int64_t)frame_us));
-    return si5351a_i2c_set_clk0_enabled(clock, false);
+    if (!si5351a_i2c_set_clk0_enabled(clock, false)) {
+        printf("WSPR RF STATE: UNKNOWN (failed to disable CLK0 after frame)\n");
+        return false;
+    }
+    printf("WSPR RF STATE: NOT TRANSMITTING (frame complete)\n");
+    return true;
+
+abort_transmission:
+    if (!si5351a_i2c_set_clk0_enabled(clock, false)) {
+        printf("WSPR RF STATE: UNKNOWN (failed to disable CLK0 after transmit error)\n");
+    } else {
+        printf("WSPR RF STATE: NOT TRANSMITTING (frame aborted)\n");
+    }
+    return false;
 }
 
 /* For test transmissions only.  Normal WSPR operation must call the _at()
@@ -312,7 +341,34 @@ static inline void wspr_run_10m_beacon(void) {
             sleep_ms(1000u);
         }
     }
+    printf("WSPR RF STATE: NOT TRANSMITTING (output initialized)\n");
 
+#if TEST_GPS_MODE
+    /* Anchor a placeholder 00:00:00 UTC to the monotonic clock.  Its first
+     * valid WSPR slot is one second later, then every two minutes. */
+    c90770_gps_monitor_state_t gps = {
+        .have_utc_time = true,
+        .utc_hour = 0u,
+        .utc_minute = 0u,
+        .utc_second = 0u,
+        .utc_captured_at = get_absolute_time(),
+    };
+    char grid[5] = WSPR_FALLBACK_GRID;
+    absolute_time_t start = wspr_next_utc_slot(&gps);
+    printf("WSPR 10m: TEST_GPS_MODE placeholder UTC=00:00:00 grid=%s; "
+           "callsign=%s power=%u dBm\n",
+           grid, WSPR_CALLSIGN, (unsigned)WSPR_POWER_DBM);
+
+    while (true) {
+        printf("WSPR frame scheduled: %s %s %u dBm\n",
+               WSPR_CALLSIGN, grid, (unsigned)WSPR_POWER_DBM);
+        if (!wspr_transmit_10m_at(&clock, WSPR_CALLSIGN, grid, WSPR_POWER_DBM, start)) {
+            printf("WSPR transmit failed: %s (reg 0x%02x)\n",
+                   si5351a_i2c_error_string(clock.last_error), clock.last_reg);
+        }
+        start = delayed_by_us(start, 120000000ll);
+    }
+#else
     c90770_uart_t uart;
     c90770_uart_init_default(&uart);
     c90770_gps_monitor_state_t gps = {0};
@@ -340,12 +396,14 @@ static inline void wspr_run_10m_beacon(void) {
         if (absolute_time_diff_us(get_absolute_time(), start) < 20000ll) {
             start = delayed_by_us(start, 120000000ll);
         }
-        printf("WSPR TX %s %s %u dBm\n", WSPR_CALLSIGN, grid, (unsigned)WSPR_POWER_DBM);
+        printf("WSPR frame scheduled: %s %s %u dBm\n",
+               WSPR_CALLSIGN, grid, (unsigned)WSPR_POWER_DBM);
         if (!wspr_transmit_10m_at(&clock, WSPR_CALLSIGN, grid, WSPR_POWER_DBM, start)) {
             printf("WSPR transmit failed: %s (reg 0x%02x)\n",
                    si5351a_i2c_error_string(clock.last_error), clock.last_reg);
         }
     }
+#endif
 }
 
 #endif

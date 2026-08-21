@@ -47,13 +47,11 @@ void pico_set_led(bool led_on) {
 
 int main() {
     stdio_init_all();
-
+    sleep_ms(5000);
     /* This loop does not return.  Keeping it first protects WSPR symbol timing
      * from the scan, sweep, GPS monitor, camera demo, and LED code below. */
-    sleep_ms(3000);
     wspr_run_10m_beacon();
 
-    sleep_ms(5000);
     si5351a_i2c_scan_default_bus();
 
     si5351a_i2c_t clock;
