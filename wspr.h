@@ -302,6 +302,7 @@ static inline absolute_time_t wspr_next_utc_slot(const c90770_gps_monitor_state_
  * called before unrelated camera, sweep, or LED work that could disturb a
  * frame's symbol timing. */
 static inline void wspr_run_10m_beacon(void) {
+    printf("running wspr beacon...\n ");
     si5351a_i2c_t clock;
     if (!si5351a_i2c_start_output_hz(&clock, WSPR_10M_DIAL_HZ) ||
         !si5351a_i2c_set_clk0_enabled(&clock, false)) {
