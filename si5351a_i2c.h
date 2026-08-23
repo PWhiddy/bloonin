@@ -40,6 +40,28 @@
 #define SI5351A_POWER_ENABLE_GPIO 28u
 #endif
 
+/* This board uses a 26 MHz reference.  Keep the reference frequency in one
+ * place so a measured value can be supplied as a compile definition for final
+ * calibration without changing requested output frequencies. */
+#ifndef SI5351A_XTAL_HZ
+#define SI5351A_XTAL_HZ 26000000u
+#endif
+
+/* An integer feedback divider keeps PLLA inside its 600-900 MHz VCO range. */
+#ifndef SI5351A_PLL_MULTIPLIER
+#define SI5351A_PLL_MULTIPLIER 34u
+#endif
+
+#define SI5351A_PLL_HZ (SI5351A_XTAL_HZ * SI5351A_PLL_MULTIPLIER)
+
+#if SI5351A_PLL_MULTIPLIER < 15u || SI5351A_PLL_MULTIPLIER > 90u
+#error "SI5351A_PLL_MULTIPLIER must be between 15 and 90"
+#endif
+
+#if SI5351A_PLL_HZ < 600000000u || SI5351A_PLL_HZ > 900000000u
+#error "SI5351A_PLL_HZ must be between 600 and 900 MHz"
+#endif
+
 #define SI5351A_OUTPUT_HZ 28126200u
 
 typedef enum {
@@ -226,10 +248,10 @@ static inline bool si5351a_i2c_multisynth_from_frequency(
     uint32_t *p2,
     uint32_t *p3
 ) {
-    static const uint32_t pll_hz = 900000000u;
+    static const uint32_t pll_hz = SI5351A_PLL_HZ;
     static const uint32_t max_denominator = 1048575u;
 
-    if (output_hz < 1000000u || output_hz > 112500000u) {
+    if (output_hz < 1000000u || output_hz > pll_hz / 8u) {
         return false;
     }
 
@@ -279,7 +301,7 @@ static inline bool si5351a_i2c_multisynth_from_frequency_ratio(
     uint32_t *p2,
     uint32_t *p3
 ) {
-    static const uint64_t pll_hz = 900000000u;
+    static const uint64_t pll_hz = SI5351A_PLL_HZ;
     static const uint32_t max_denominator = 1048575u;
 
     if (output_numerator == 0u || output_denominator == 0u) {
@@ -387,7 +409,8 @@ static inline void si5351a_i2c_init_default_bus(si5351a_i2c_t *clock) {
 }
 
 static inline bool si5351a_i2c_configure_output_hz(si5351a_i2c_t *clock, uint32_t output_hz) {
-    static const uint32_t plla_p1 = 4096u;   // 25 MHz crystal * 36 = 900 MHz PLLA.
+    /* 26 MHz crystal * 34 = 884 MHz PLLA. */
+    static const uint32_t plla_p1 = 128u * SI5351A_PLL_MULTIPLIER - 512u;
     static const uint32_t plla_p2 = 0u;
     static const uint32_t plla_p3 = 1u;
 
