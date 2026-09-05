@@ -62,7 +62,9 @@
 #error "SI5351A_PLL_HZ must be between 600 and 900 MHz"
 #endif
 
-#define SI5351A_OUTPUT_HZ 28126200u
+#ifndef SI5351A_OUTPUT_HZ
+#define SI5351A_OUTPUT_HZ 14097100u
+#endif
 
 typedef enum {
     SI5351A_DRIVE_2MA = 0,
@@ -408,7 +410,9 @@ static inline void si5351a_i2c_init_default_bus(si5351a_i2c_t *clock) {
     );
 }
 
-static inline bool si5351a_i2c_configure_output_hz(si5351a_i2c_t *clock, uint32_t output_hz) {
+static inline bool si5351a_i2c_configure_output_hz_enabled(
+    si5351a_i2c_t *clock, uint32_t output_hz, bool enabled
+) {
     /* 26 MHz crystal * 34 = 884 MHz PLLA. */
     static const uint32_t plla_p1 = 128u * SI5351A_PLL_MULTIPLIER - 512u;
     static const uint32_t plla_p2 = 0u;
@@ -476,7 +480,7 @@ static inline bool si5351a_i2c_configure_output_hz(si5351a_i2c_t *clock, uint32_
         return false;
     }
 
-    if (!si5351a_i2c_write_reg(clock, 3u, 0xfcu)) {
+    if (!si5351a_i2c_write_reg(clock, 3u, enabled ? 0xfcu : 0xffu)) {
         si5351a_i2c_set_error(clock, SI5351A_ERROR_ENABLE_CLK0_CLK1_FAILED, 3u);
         return false;
     }
@@ -485,7 +489,16 @@ static inline bool si5351a_i2c_configure_output_hz(si5351a_i2c_t *clock, uint32_
     return true;
 }
 
-static inline bool si5351a_i2c_start_28_1262_mhz(si5351a_i2c_t *clock) {
+static inline bool si5351a_i2c_configure_output_hz(si5351a_i2c_t *clock, uint32_t output_hz) {
+    return si5351a_i2c_configure_output_hz_enabled(clock, output_hz, true);
+}
+
+static inline bool si5351a_i2c_prepare_output_hz(si5351a_i2c_t *clock, uint32_t output_hz) {
+    si5351a_i2c_init_default_bus(clock);
+    return si5351a_i2c_configure_output_hz_enabled(clock, output_hz, false);
+}
+
+static inline bool si5351a_i2c_start_default_output(si5351a_i2c_t *clock) {
     si5351a_i2c_init_default_bus(clock);
     return si5351a_i2c_configure_output_hz(clock, SI5351A_OUTPUT_HZ);
 }

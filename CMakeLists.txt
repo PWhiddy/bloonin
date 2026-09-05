@@ -22,11 +22,15 @@ add_executable(bloon
 # pull in common dependencies
 target_link_libraries(bloon
     pico_stdlib
+    pico_multicore
     hardware_i2c
     hardware_pwm
     hardware_pio
     hardware_dma
 )
+
+# A host that stops reading logs must not stall GPS reception or slot timing.
+target_compile_definitions(bloon PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=0)
 
 if (PICO_CYW43_SUPPORTED)
     target_link_libraries(bloon pico_cyw43_arch_none)

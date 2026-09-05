@@ -1,6 +1,6 @@
-/* Standard WSPR (type 1) encoder and 10 m transmitter for an Si5351A.
+/* Standard WSPR (type 1) encoder and transmitter for an Si5351A.
  *
- * The transmitter uses CLK0.  Attach CLK0 to a correctly filtered 10 m RF
+ * The transmitter defaults to 20 m on CLK0.  Attach CLK0 to a correctly filtered RF
  * chain; a Si5351A square-wave output is not legal or suitable as an antenna
  * feed by itself.  A calibrated reference (preferably a GPSDO/TCXO) is needed
  * for reliable weak-signal reception.
@@ -20,8 +20,11 @@
 #define WSPR_SYMBOL_COUNT 162u
 #define WSPR_SYMBOL_PERIOD_NUMERATOR_US 8192000000ull
 #define WSPR_SYMBOL_PERIOD_DENOMINATOR 12000u
- // updated to 20m
-#define WSPR_10M_DIAL_HZ 28126100u // 14097100u // 28126100u
+/* Actual RF tone-zero frequency, not the receiver's USB dial frequency. */
+#ifndef WSPR_BASE_HZ
+#define WSPR_BASE_HZ 14097100u
+#endif
+#define WSPR_SLOT_PERIOD_US 120000000ll
 #define WSPR_TONE_DENOMINATOR 256u
 #define WSPR_TONE_STEP_NUMERATOR 375u
 
@@ -36,12 +39,6 @@
 #endif
 #ifndef WSPR_POWER_DBM
 #define WSPR_POWER_DBM 10u
-#endif
-
-/* Keep the beacon usable on the bench without a GPS fix.  Set this to 0 for
- * normal operation, where UTC and the Maidenhead grid come from the GPS. */
-#ifndef TEST_GPS_MODE
-#define TEST_GPS_MODE 1
 #endif
 
 static inline uint8_t wspr_parity32(uint32_t value) {
@@ -191,7 +188,8 @@ static inline bool wspr_encode(
 }
 
 static inline bool wspr_grid_from_coordinates(double latitude, double longitude, char grid[5]) {
-    if (latitude < -90.0 || latitude >= 90.0 || longitude < -180.0 || longitude >= 180.0) {
+    if (!isfinite(latitude) || !isfinite(longitude) ||
+        latitude < -90.0 || latitude >= 90.0 || longitude < -180.0 || longitude >= 180.0) {
         return false;
     }
     double lon = longitude + 180.0;
@@ -211,197 +209,140 @@ static inline bool wspr_grid_from_coordinates(double latitude, double longitude,
     return true;
 }
 
-/* This is deliberately blocking: preserving every symbol deadline is more
- * important than handling unrelated work during a 110.592 second WSPR frame. */
-static inline bool wspr_transmit_10m_at(
-    si5351a_i2c_t *clock,
-    const char *callsign,
-    const char grid[4],
-    uint8_t power_dbm,
-    absolute_time_t start
-) {
-    /* Establish and report a known-safe state before preparing the frame. */
-    if (!si5351a_i2c_set_clk0_enabled(clock, false)) {
-        printf("WSPR RF STATE: UNKNOWN (failed to disable CLK0)\n");
-        return false;
-    }
-    printf("WSPR RF STATE: NOT TRANSMITTING (waiting for frame start)\n");
+typedef struct {
+    uint32_t p1, p2, p3;
+} wspr_tone_t;
 
+typedef struct {
     uint8_t symbols[WSPR_SYMBOL_COUNT];
-    if (!wspr_encode(callsign, grid, power_dbm, symbols)) {
-        return false;
-    }
+    wspr_tone_t tones[4];
+    uint32_t symbol;
+    absolute_time_t start;
+    bool active;
+} wspr_transmitter_t;
 
-    /* 28.126100 MHz is the conventional 10 m WSPR transmit centre. */
-    uint64_t initial_frequency = (uint64_t)WSPR_10M_DIAL_HZ * WSPR_TONE_DENOMINATOR +
-                                 (uint64_t)WSPR_TONE_STEP_NUMERATOR * symbols[0];
-    uint32_t current_p1 = 0u;
-    uint32_t initial_p2 = 0u;
-    uint32_t current_p3 = 0u;
-    if (!si5351a_i2c_multisynth_from_frequency_ratio(
-            initial_frequency, WSPR_TONE_DENOMINATOR, &current_p1, &initial_p2, &current_p3) ||
-        !si5351a_i2c_write_multisynth(clock, 42u, current_p1, initial_p2, current_p3, 0u, false)) {
-        return false;
-    }
-
-    /* Enable ten milliseconds early so logging completes before symbol zero. */
-    sleep_until(delayed_by_us(start, -10000));
-    if (!si5351a_i2c_set_clk0_enabled(clock, true)) {
-        printf("WSPR RF STATE: UNKNOWN (failed to enable CLK0)\n");
-        return false;
-    }
-    printf("WSPR RF STATE: TRANSMITTING\n");
-
-    for (uint32_t i = 0u; i < WSPR_SYMBOL_COUNT; ++i) {
-        uint64_t offset_us = ((uint64_t)i * WSPR_SYMBOL_PERIOD_NUMERATOR_US) /
-                             WSPR_SYMBOL_PERIOD_DENOMINATOR;
-        sleep_until(delayed_by_us(start, (int64_t)offset_us));
-        if (i + 1u < WSPR_SYMBOL_COUNT) {
-            uint64_t frequency = (uint64_t)WSPR_10M_DIAL_HZ * WSPR_TONE_DENOMINATOR +
-                                 (uint64_t)WSPR_TONE_STEP_NUMERATOR * symbols[i + 1u];
-            uint32_t next_p1 = 0u;
-            uint32_t next_p2 = 0u;
-            uint32_t next_p3 = 0u;
-            if (!si5351a_i2c_multisynth_from_frequency_ratio(
-                    frequency, WSPR_TONE_DENOMINATOR, &next_p1, &next_p2, &next_p3)) {
-                goto abort_transmission;
-            }
-            if (next_p1 == current_p1 && next_p3 == current_p3) {
-                /* Only P2 changes for the four 10 m WSPR tones.  Updating
-                 * registers 47..49 takes four I2C bytes rather than nine. */
-                uint8_t p2_registers[3] = {
-                    (uint8_t)((((next_p3 >> 16) & 0x0fu) << 4) | ((next_p2 >> 16) & 0x0fu)),
-                    (uint8_t)((next_p2 >> 8) & 0xffu),
-                    (uint8_t)(next_p2 & 0xffu),
-                };
-                if (!si5351a_i2c_write_regs(clock, 47u, p2_registers, sizeof(p2_registers))) {
-                    goto abort_transmission;
-                }
-            } else if (!si5351a_i2c_write_multisynth(clock, 42u, next_p1, next_p2, next_p3, 0u, false)) {
-                goto abort_transmission;
-            }
-            current_p1 = next_p1;
-            current_p3 = next_p3;
-        }
-    }
-    uint64_t frame_us = ((uint64_t)WSPR_SYMBOL_COUNT * WSPR_SYMBOL_PERIOD_NUMERATOR_US) /
-                        WSPR_SYMBOL_PERIOD_DENOMINATOR;
-    sleep_until(delayed_by_us(start, (int64_t)frame_us));
-    if (!si5351a_i2c_set_clk0_enabled(clock, false)) {
-        printf("WSPR RF STATE: UNKNOWN (failed to disable CLK0 after frame)\n");
-        return false;
-    }
-    printf("WSPR RF STATE: NOT TRANSMITTING (frame complete)\n");
-    return true;
-
-abort_transmission:
-    if (!si5351a_i2c_set_clk0_enabled(clock, false)) {
-        printf("WSPR RF STATE: UNKNOWN (failed to disable CLK0 after transmit error)\n");
-    } else {
-        printf("WSPR RF STATE: NOT TRANSMITTING (frame aborted)\n");
-    }
-    return false;
+static inline uint64_t wspr_symbol_offset_us(uint32_t symbol) {
+    return ((uint64_t)symbol * WSPR_SYMBOL_PERIOD_NUMERATOR_US) /
+           WSPR_SYMBOL_PERIOD_DENOMINATOR;
 }
 
-/* For test transmissions only.  Normal WSPR operation must call the _at()
- * form with a UTC-slot start (one second into an even UTC minute). */
-static inline bool wspr_transmit_10m(
-    si5351a_i2c_t *clock,
-    const char *callsign,
-    const char grid[4],
-    uint8_t power_dbm
+/* Prepare while RF is off so a trigger only needs the output-enable write. */
+static inline bool wspr_prepare(
+    si5351a_i2c_t *clock, wspr_transmitter_t *tx,
+    const char *callsign, const char grid[4], uint8_t power_dbm
 ) {
-    return wspr_transmit_10m_at(
-        clock, callsign, grid, power_dbm, make_timeout_time_us(20000u));
+    tx->active = false;
+    if (!si5351a_i2c_set_clk0_enabled(clock, false) ||
+        !wspr_encode(callsign, grid, power_dbm, tx->symbols)) {
+        return false;
+    }
+    for (uint32_t i = 0; i < 4u; ++i) {
+        uint64_t frequency = (uint64_t)WSPR_BASE_HZ * WSPR_TONE_DENOMINATOR +
+                             (uint64_t)WSPR_TONE_STEP_NUMERATOR * i;
+        wspr_tone_t *tone = &tx->tones[i];
+        if (!si5351a_i2c_multisynth_from_frequency_ratio(
+                frequency, WSPR_TONE_DENOMINATOR, &tone->p1, &tone->p2, &tone->p3)) {
+            return false;
+        }
+    }
+    const wspr_tone_t *tone = &tx->tones[tx->symbols[0]];
+    return si5351a_i2c_write_multisynth(
+        clock, 42u, tone->p1, tone->p2, tone->p3, 0u, false);
+}
+
+static inline bool wspr_start(
+    si5351a_i2c_t *clock, wspr_transmitter_t *tx, absolute_time_t start
+) {
+    if (!si5351a_i2c_set_clk0_enabled(clock, true)) {
+        return false;
+    }
+    tx->start = start;
+    tx->symbol = 0u;
+    tx->active = true;
+    return true;
+}
+
+static inline absolute_time_t wspr_symbol_deadline(const wspr_transmitter_t *tx) {
+    return delayed_by_us(tx->start, (int64_t)wspr_symbol_offset_us(tx->symbol + 1u));
+}
+
+/* Service one symbol deadline. GPS and serial reception can run between calls.
+ * Symbol zero stays on air until boundary one; symbol 161 ends at 110.592 s. */
+static inline bool wspr_poll_transmitter(si5351a_i2c_t *clock, wspr_transmitter_t *tx) {
+    if (!tx->active || !time_reached(wspr_symbol_deadline(tx))) {
+        return true;
+    }
+    if (tx->symbol + 1u == WSPR_SYMBOL_COUNT) {
+        tx->active = false;
+        return si5351a_i2c_set_clk0_enabled(clock, false);
+    }
+    const wspr_tone_t *previous = &tx->tones[tx->symbols[tx->symbol]];
+    const wspr_tone_t *next = &tx->tones[tx->symbols[++tx->symbol]];
+    bool ok;
+    if (previous->p1 == next->p1 && previous->p3 == next->p3) {
+        /* When only P2 changes, three registers suffice on any band. */
+        uint8_t registers[3] = {
+            (uint8_t)((((next->p3 >> 16) & 0x0fu) << 4) | ((next->p2 >> 16) & 0x0fu)),
+            (uint8_t)(next->p2 >> 8),
+            (uint8_t)next->p2,
+        };
+        ok = si5351a_i2c_write_regs(clock, 47u, registers, sizeof(registers));
+    } else {
+        ok = si5351a_i2c_write_multisynth(
+            clock, 42u, next->p1, next->p2, next->p3, 0u, false);
+    }
+    if (!ok) {
+        tx->active = false;
+        si5351a_i2c_set_clk0_enabled(clock, false);
+    }
+    return ok;
+}
+
+/* Blocking convenience API; the beacon uses the polling API above. */
+static inline bool wspr_transmit_at(
+    si5351a_i2c_t *clock, const char *callsign, const char grid[4],
+    uint8_t power_dbm, absolute_time_t start
+) {
+    wspr_transmitter_t tx = {0};
+    if (!wspr_prepare(clock, &tx, callsign, grid, power_dbm)) {
+        return false;
+    }
+    sleep_until(start);
+    if (!wspr_start(clock, &tx, start)) {
+        return false;
+    }
+    while (tx.active) {
+        sleep_until(wspr_symbol_deadline(&tx));
+        if (!wspr_poll_transmitter(clock, &tx)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline bool wspr_transmit(
+    si5351a_i2c_t *clock, const char *callsign, const char grid[4], uint8_t power_dbm
+) {
+    return wspr_transmit_at(clock, callsign, grid, power_dbm, make_timeout_time_us(20000u));
+}
+
+static inline absolute_time_t wspr_next_utc_slot_at(
+    const c90770_gps_monitor_state_t *gps, absolute_time_t now
+) {
+    /* Include elapsed monotonic time and fractional NMEA seconds, so an old
+     * reading still selects a future hh:mm:01 slot, including across midnight. */
+    int64_t utc_us = (3600ll * gps->utc_hour + 60ll * gps->utc_minute +
+                      gps->utc_second) * 1000000ll + gps->utc_microsecond;
+    utc_us += absolute_time_diff_us(gps->utc_captured_at, now);
+    int64_t slot_us = (utc_us / WSPR_SLOT_PERIOD_US) * WSPR_SLOT_PERIOD_US + 1000000ll;
+    if (slot_us <= utc_us) {
+        slot_us += WSPR_SLOT_PERIOD_US;
+    }
+    return delayed_by_us(now, slot_us - utc_us);
 }
 
 static inline absolute_time_t wspr_next_utc_slot(const c90770_gps_monitor_state_t *gps) {
-    /* WSPR starts at hh:mm:01 for every even UTC minute. */
-    uint32_t now = 3600u * gps->utc_hour + 60u * gps->utc_minute + gps->utc_second;
-    uint32_t slot = (now / 120u) * 120u + 1u;
-    if (slot <= now) {
-        slot += 120u;
-    }
-    return delayed_by_us(gps->utc_captured_at, (int64_t)(slot - now) * 1000000ll);
-}
-
-/* This loop owns the application while WSPR is enabled.  It is intentionally
- * called before unrelated camera, sweep, or LED work that could disturb a
- * frame's symbol timing. */
-static inline void wspr_run_10m_beacon(void) {
-    printf("running wspr beacon...\n ");
-    si5351a_i2c_t clock;
-    if (!si5351a_i2c_start_output_hz(&clock, WSPR_10M_DIAL_HZ) ||
-        !si5351a_i2c_set_clk0_enabled(&clock, false)) {
-        printf("Si5351A init failed: %s (reg 0x%02x)\n",
-               si5351a_i2c_error_string(clock.last_error), clock.last_reg);
-        while (true) {
-            sleep_ms(1000u);
-        }
-    }
-    printf("WSPR RF STATE: NOT TRANSMITTING (output initialized)\n");
-
-#if TEST_GPS_MODE
-    /* Anchor a placeholder 00:00:00 UTC to the monotonic clock.  Its first
-     * valid WSPR slot is one second later, then every two minutes. */
-    c90770_gps_monitor_state_t gps = {
-        .have_utc_time = true,
-        .utc_hour = 0u,
-        .utc_minute = 0u,
-        .utc_second = 0u,
-        .utc_captured_at = get_absolute_time(),
-    };
-    char grid[5] = WSPR_FALLBACK_GRID;
-    absolute_time_t start = wspr_next_utc_slot(&gps);
-    printf("WSPR 10m: TEST_GPS_MODE placeholder UTC=00:00:00 grid=%s; "
-           "callsign=%s power=%u dBm\n",
-           grid, WSPR_CALLSIGN, (unsigned)WSPR_POWER_DBM);
-
-    while (true) {
-        printf("WSPR frame scheduled: %s %s %u dBm\n",
-               WSPR_CALLSIGN, grid, (unsigned)WSPR_POWER_DBM);
-        if (!wspr_transmit_10m_at(&clock, WSPR_CALLSIGN, grid, WSPR_POWER_DBM, start)) {
-            printf("WSPR transmit failed: %s (reg 0x%02x)\n",
-                   si5351a_i2c_error_string(clock.last_error), clock.last_reg);
-        }
-        start = delayed_by_us(start, 120000000ll);
-    }
-#else
-    c90770_uart_t uart;
-    c90770_uart_init_default(&uart);
-    c90770_gps_monitor_state_t gps = {0};
-    char line[128];
-    printf("WSPR 10m: waiting for valid GPS UTC; callsign=%s power=%u dBm\n",
-           WSPR_CALLSIGN, (unsigned)WSPR_POWER_DBM);
-
-    while (true) {
-        size_t length = c90770_uart_read_line_timeout(&uart, line, sizeof(line), 100000u);
-        if (length == 0u) {
-            continue;
-        }
-        c90770_parse_gps_line(&gps, line);
-        if (!gps.have_utc_time) {
-            continue;
-        }
-
-        char grid[5] = WSPR_FALLBACK_GRID;
-        if (gps.have_coordinates &&
-            !wspr_grid_from_coordinates(gps.latitude_degrees, gps.longitude_degrees, grid)) {
-            memcpy(grid, WSPR_FALLBACK_GRID, sizeof(grid));
-        }
-
-        absolute_time_t start = wspr_next_utc_slot(&gps);
-        if (absolute_time_diff_us(get_absolute_time(), start) < 20000ll) {
-            start = delayed_by_us(start, 120000000ll);
-        }
-        printf("WSPR frame scheduled: %s %s %u dBm\n",
-               WSPR_CALLSIGN, grid, (unsigned)WSPR_POWER_DBM);
-        if (!wspr_transmit_10m_at(&clock, WSPR_CALLSIGN, grid, WSPR_POWER_DBM, start)) {
-            printf("WSPR transmit failed: %s (reg 0x%02x)\n",
-                   si5351a_i2c_error_string(clock.last_error), clock.last_reg);
-        }
-    }
-#endif
+    return wspr_next_utc_slot_at(gps, get_absolute_time());
 }
 
 #endif

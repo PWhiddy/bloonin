@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -137,6 +138,7 @@ typedef struct {
     double altitude_meters;
     bool have_altitude;
     int fix_quality;
+    int fix_type;
     int satellites_used;
     char fix_source[4];
 
@@ -146,12 +148,45 @@ typedef struct {
     uint8_t utc_hour;
     uint8_t utc_minute;
     uint8_t utc_second;
+    uint32_t utc_microsecond;
     absolute_time_t utc_captured_at;
 
     uint32_t last_satellite_hash;
     uint32_t last_fix_hash;
     uint32_t checksum_failures;
+    bool quiet;
+    char status_text[96];
 } c90770_gps_monitor_state_t;
+
+/* Keep partial sentences across polls and resynchronize at the next '$' after
+ * a truncated/oversized sentence. No UART timeout may block serial triggers. */
+typedef struct {
+    char line[128];
+    size_t length;
+    absolute_time_t started_at;
+} c90770_nmea_stream_t;
+
+static inline bool c90770_nmea_stream_push(
+    c90770_nmea_stream_t *stream, char byte, absolute_time_t received_at
+) {
+    if (byte == '$') {
+        stream->length = 0u;
+        stream->started_at = received_at;
+    } else if (stream->length == 0u) {
+        return false;
+    }
+    if (stream->length + 1u >= sizeof(stream->line)) {
+        stream->length = 0u;
+        return false;
+    }
+    stream->line[stream->length++] = byte;
+    if (byte != '\n') {
+        return false;
+    }
+    stream->line[stream->length] = '\0';
+    stream->length = 0u;
+    return true;
+}
 
 static inline void c90770_trim_line_end(char *line) {
     size_t len = strlen(line);
@@ -243,6 +278,33 @@ static inline double c90770_nmea_coordinate_to_degrees(const char *value, const 
     }
 
     return coordinate;
+}
+
+static inline bool c90770_parse_coordinates(
+    const char *latitude, const char *ns, const char *longitude, const char *ew,
+    double *lat, double *lon
+) {
+    if (latitude[0] == '\0' || longitude[0] == '\0' ||
+        (strcmp(ns, "N") != 0 && strcmp(ns, "S") != 0) ||
+        (strcmp(ew, "E") != 0 && strcmp(ew, "W") != 0)) {
+        return false;
+    }
+    const char *values[2] = {latitude, longitude};
+    for (size_t i = 0; i < 2u; ++i) {
+        char *end;
+        double raw = strtod(values[i], &end);
+        if (*end != '\0' || !isfinite(raw) || raw < 0.0 ||
+            raw > (i == 0u ? 9000.0 : 18000.0)) {
+            return false;
+        }
+        double minutes = raw - (int)(raw / 100.0) * 100.0;
+        if (minutes >= 60.0) {
+            return false;
+        }
+    }
+    *lat = c90770_nmea_coordinate_to_degrees(latitude, ns);
+    *lon = c90770_nmea_coordinate_to_degrees(longitude, ew);
+    return true;
 }
 
 static inline uint32_t c90770_hash_u32(uint32_t hash, uint32_t value) {
@@ -363,6 +425,7 @@ static inline uint32_t c90770_fix_hash(const c90770_gps_monitor_state_t *state) 
 }
 
 static inline void c90770_log_satellites_if_changed(c90770_gps_monitor_state_t *state) {
+    if (state->quiet) return;
     uint32_t hash = c90770_satellite_hash(state);
     if (hash == state->last_satellite_hash) {
         return;
@@ -398,7 +461,7 @@ static inline void c90770_log_satellites_if_changed(c90770_gps_monitor_state_t *
     }
     printf("\n");
     printf(
-        "gps almanac progress: geometry=%d/%u tracked=%d/%u\n",
+        "gps tracking progress: geometry=%d/%u tracked=%d/%u\n",
         geometry,
         (unsigned)reported,
         tracked,
@@ -407,6 +470,7 @@ static inline void c90770_log_satellites_if_changed(c90770_gps_monitor_state_t *
 }
 
 static inline void c90770_log_fix_if_changed(c90770_gps_monitor_state_t *state) {
+    if (state->quiet) return;
     uint32_t hash = c90770_fix_hash(state);
     if (hash == state->last_fix_hash) {
         return;
@@ -474,10 +538,11 @@ static inline void c90770_handle_gga(c90770_gps_monitor_state_t *state, char **f
     state->fix_quality = fix_quality;
     state->satellites_used = c90770_parse_int_field(fields[7], 0);
 
-    if (fix_quality > 0 && fields[2][0] != '\0' && fields[4][0] != '\0') {
-        state->latitude_degrees = c90770_nmea_coordinate_to_degrees(fields[2], fields[3]);
-        state->longitude_degrees = c90770_nmea_coordinate_to_degrees(fields[4], fields[5]);
-        state->have_coordinates = true;
+    state->have_coordinates = fix_quality > 0 && c90770_parse_coordinates(
+        fields[2], fields[3], fields[4], fields[5],
+        &state->latitude_degrees, &state->longitude_degrees);
+    state->have_altitude = false;
+    if (state->have_coordinates) {
         memcpy(state->fix_source, "GGA", 4u);
 
         if (fields[9][0] != '\0') {
@@ -489,12 +554,16 @@ static inline void c90770_handle_gga(c90770_gps_monitor_state_t *state, char **f
     c90770_log_fix_if_changed(state);
 }
 
-static inline void c90770_handle_rmc(c90770_gps_monitor_state_t *state, char **fields, size_t field_count) {
+static inline void c90770_handle_rmc(
+    c90770_gps_monitor_state_t *state, char **fields, size_t field_count,
+    absolute_time_t captured_at
+) {
     if (field_count < 7u) {
         return;
     }
 
     bool valid = fields[2][0] == 'A';
+    state->have_utc_time = false;
     if (valid && strlen(fields[1]) >= 6u &&
         fields[1][0] >= '0' && fields[1][0] <= '9' &&
         fields[1][1] >= '0' && fields[1][1] <= '9' &&
@@ -505,21 +574,36 @@ static inline void c90770_handle_rmc(c90770_gps_monitor_state_t *state, char **f
         uint8_t hour = (uint8_t)(10u * (fields[1][0] - '0') + fields[1][1] - '0');
         uint8_t minute = (uint8_t)(10u * (fields[1][2] - '0') + fields[1][3] - '0');
         uint8_t second = (uint8_t)(10u * (fields[1][4] - '0') + fields[1][5] - '0');
-        if (hour < 24u && minute < 60u && second < 60u) {
+        uint32_t microsecond = 0u;
+        uint32_t scale = 100000u;
+        const char *fraction = fields[1] + 6;
+        bool valid_fraction = *fraction == '\0';
+        if (*fraction == '.') {
+            ++fraction;
+            valid_fraction = *fraction != '\0';
+            for (; *fraction != '\0'; ++fraction) {
+                if (*fraction < '0' || *fraction > '9') {
+                    valid_fraction = false;
+                    break;
+                }
+                microsecond += (uint32_t)(*fraction - '0') * scale;
+                scale /= 10u;
+            }
+        }
+        if (hour < 24u && minute < 60u && second < 60u && valid_fraction) {
             state->have_utc_time = true;
             state->utc_hour = hour;
             state->utc_minute = minute;
             state->utc_second = second;
-            state->utc_captured_at = get_absolute_time();
+            state->utc_microsecond = microsecond;
+            state->utc_captured_at = captured_at;
         }
     }
-    if (valid && fields[3][0] != '\0' && fields[5][0] != '\0') {
-        state->latitude_degrees = c90770_nmea_coordinate_to_degrees(fields[3], fields[4]);
-        state->longitude_degrees = c90770_nmea_coordinate_to_degrees(fields[5], fields[6]);
-        state->have_coordinates = true;
+    state->have_coordinates = valid && c90770_parse_coordinates(
+        fields[3], fields[4], fields[5], fields[6],
+        &state->latitude_degrees, &state->longitude_degrees);
+    if (state->have_coordinates) {
         memcpy(state->fix_source, "RMC", 4u);
-    } else if (!valid) {
-        state->have_coordinates = false;
     }
 
     c90770_log_fix_if_changed(state);
@@ -531,28 +615,31 @@ static inline void c90770_handle_gsa(c90770_gps_monitor_state_t *state, char **f
     }
 
     int fix_type = c90770_parse_int_field(fields[2], 1);
+    state->fix_type = fix_type;
     if (fix_type <= 1) {
         state->have_coordinates = false;
     }
     c90770_log_fix_if_changed(state);
 }
 
-static inline void c90770_handle_txt(char **fields, size_t field_count) {
+static inline void c90770_handle_txt(c90770_gps_monitor_state_t *state, char **fields, size_t field_count) {
     if (field_count < 5u || fields[4][0] == '\0') {
         return;
     }
 
-    if (strcmp(fields[4], "ANTENNA OPEN") == 0 || strcmp(fields[4], "ANTENNA OK") == 0) {
+    if (strncmp(state->status_text, fields[4], sizeof(state->status_text) - 1u) == 0) {
         return;
     }
-
-    printf("gps text: %s\n", fields[4]);
+    snprintf(state->status_text, sizeof(state->status_text), "%s", fields[4]);
+    if (!state->quiet) printf("gps text: %s\n", state->status_text);
 }
 
-static inline void c90770_parse_gps_line(c90770_gps_monitor_state_t *state, char *line) {
+static inline void c90770_parse_gps_line_at(
+    c90770_gps_monitor_state_t *state, char *line, absolute_time_t captured_at
+) {
     if (!c90770_nmea_verify_checksum(line)) {
         ++state->checksum_failures;
-        printf("gps checksum failed: %lu\n", (unsigned long)state->checksum_failures);
+        if (!state->quiet) printf("gps checksum failed: %lu\n", (unsigned long)state->checksum_failures);
         return;
     }
 
@@ -568,12 +655,16 @@ static inline void c90770_parse_gps_line(c90770_gps_monitor_state_t *state, char
     } else if (strcmp(sentence_type, "GGA") == 0) {
         c90770_handle_gga(state, fields, field_count);
     } else if (strcmp(sentence_type, "RMC") == 0) {
-        c90770_handle_rmc(state, fields, field_count);
+        c90770_handle_rmc(state, fields, field_count, captured_at);
     } else if (strcmp(sentence_type, "GSA") == 0) {
         c90770_handle_gsa(state, fields, field_count);
     } else if (strcmp(sentence_type, "TXT") == 0) {
-        c90770_handle_txt(fields, field_count);
+        c90770_handle_txt(state, fields, field_count);
     }
+}
+
+static inline void c90770_parse_gps_line(c90770_gps_monitor_state_t *state, char *line) {
+    c90770_parse_gps_line_at(state, line, get_absolute_time());
 }
 
 static inline void c90770_uart_monitor_gps_parsed() {
