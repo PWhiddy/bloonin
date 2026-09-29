@@ -39,7 +39,7 @@ static struct {
     int utc_origin;
     bool usb, usb_cycle, usb_blocked, gps;
     bool time_only, location_only, malformed, fractional, midnight;
-    bool noisy, moving, silence, reacquire;
+    bool noisy, moving, silence, reacquire, no_altitude;
     int64_t fix_at, loss_at, recover_at, move_at;
     int64_t first_sentence;
     const char *fault;
@@ -280,10 +280,20 @@ static void configure(const char *name) {
     else if (!strcmp(name, "gps_silent")) { sim.loss_at = 20 * SECOND; sim.silence = true; }
     else if (!strcmp(name, "gps_reacquire")) {
         sim.loss_at = 20 * SECOND; sim.recover_at = 125 * SECOND; sim.move_at = 125 * SECOND;
-    } else if (!strcmp(name, "moving")) sim.move_at = 30 * SECOND;
+    } else if (!strcmp(name, "moving")) { sim.move_at = 30 * SECOND; sim.duration = 725 * SECOND; }
+    else if (!strcmp(name, "no_altitude")) sim.no_altitude = true;
+    else if (!strcmp(name, "gps_priority")) {
+        sim.duration = 725 * SECOND;
+        serial_byte(10 * SECOND, 'g'); serial_byte(125 * SECOND, 'g');
+        serial_byte(245 * SECOND, 'g'); serial_byte(370 * SECOND, 'g');
+    } else if (!strcmp(name, "gps_late_reacquire")) {
+        sim.loss_at = 20 * SECOND; sim.recover_at = 400 * SECOND;
+        sim.move_at = 400 * SECOND; sim.duration = 845 * SECOND;
+    }
     else if (!strcmp(name, "midnight")) sim.utc_origin = 86390;
     else if (!strcmp(name, "fractional")) sim.fractional = true;
-    else if (!strcmp(name, "near_slot_before")) sim.first_sentence = sim.fix_at = 10800000;
+    else if (!strcmp(name, "near_slot_before")) sim.first_sentence = sim.fix_at = 10600000;
+    else if (!strcmp(name, "altitude_after_slot")) sim.first_sentence = sim.fix_at = 10800000;
     else if (!strcmp(name, "near_slot_after")) sim.first_sentence = sim.fix_at = 10980000;
     else if (!strcmp(name, "time_only")) sim.time_only = true;
     else if (!strcmp(name, "location_only")) sim.location_only = true;
@@ -300,6 +310,7 @@ static void configure(const char *name) {
         sim.usb = false; sim.loss_at = 20 * SECOND; sim.silence = true; sim.duration = 1205 * SECOND;
     } else { fprintf(stderr, "Unknown scenario: %s\n", name); exit(2); }
 
+    if (!strcmp(name, "gps_loss") || !strcmp(name, "gps_silent")) sim.duration = 725 * SECOND;
     if (sim.noisy) {
         uart_text(100000, "noise$GPRMC,truncated");
         char oversized[202]; memset(oversized, 'x', sizeof(oversized));
@@ -325,9 +336,9 @@ static void configure(const char *name) {
                      sim.location_only ? "badtime" : utc, valid ? 'A' : 'V',
                      sim.time_only ? ",,," : sim.malformed ? "nan,N,01131.000,E" : coords);
             sentence(at, payload, false);
-            snprintf(payload, sizeof(payload), "GPGGA,%s,%s,%d,08,1.0,123.0,M,0,M,,",
+            snprintf(payload, sizeof(payload), "GPGGA,%s,%s,%d,08,1.0,%s,M,0,M,,",
                      utc, sim.time_only ? ",,," : sim.malformed ? "nan,N,01131.000,E" : coords,
-                     valid ? 1 : 0);
+                     valid ? 1 : 0, sim.no_altitude ? "" : at >= sim.move_at ? "456.5" : "123.0");
             sentence(at + 150000, payload, false);
             /* Repeat stable status and vary SNR each second to test log noise. */
             snprintf(payload, sizeof(payload), "GPGSV,1,1,02,01,45,180,%d,02,40,090,35", sec % 2 ? 30 : 31);
@@ -356,12 +367,12 @@ static void report(void) {
            "\"dropped_logs\":%u,\"gps_revision\":%u,\"checksum_failures\":%u,"
            "\"outputs_ever_enabled\":%u,\"unused_outputs_ever_powered\":%u,"
            "\"output_disable_mask\":%u,\"callsign\":\"%s\",\"fallback_grid\":\"%s\","
-           "\"power_dbm\":%u,\"frames\":[",
+           "\"callsign_fine\":\"%s\",\"callsign_alt\":\"%s\",\"power_dbm\":%u,\"frames\":[",
            sim.name, (long long)sim.duration, sim.uart_size, sim.uart_read, sim.uart_overruns,
            sim.serial_read, sim.fault_count, sim.rf ? "true" : "false", sim.dropped,
            wspr_gps_revision, wspr_gps_shared.checksum_failures,
            sim.outputs_ever_enabled, sim.unused_outputs_ever_powered, sim.registers[3],
-           WSPR_CALLSIGN, WSPR_FALLBACK_GRID, (unsigned)WSPR_POWER_DBM);
+           WSPR_CALLSIGN, WSPR_FALLBACK_GRID, WSPR_CALLSIGN_FINE, WSPR_CALLSIGN_ALT, (unsigned)WSPR_POWER_DBM);
     for (unsigned i = 0; i < sim.frame_count; ++i) {
         frame_t *frame = &sim.frames[i];
         printf("%s{\"start_us\":%lld,\"end_us\":%lld,\"tones\":[", i ? "," : "",

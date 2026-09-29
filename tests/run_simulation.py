@@ -20,10 +20,10 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = [
-    "no_inputs", "usb_waiting", "gps_no_usb", "gps_usb", "serial_only",
+    "no_altitude", "gps_priority", "gps_late_reacquire", "no_inputs", "usb_waiting", "gps_no_usb", "gps_usb", "serial_only",
     "simultaneous", "gps_during_serial_frame", "gps_loss", "gps_silent",
     "gps_reacquire", "moving", "midnight", "fractional", "near_slot_before",
-    "near_slot_after", "time_only", "location_only", "malformed", "noisy_uart",
+    "near_slot_after", "altitude_after_slot", "time_only", "location_only", "malformed", "noisy_uart",
     "usb_reconnect", "usb_backpressure", "i2c_init_failure", "i2c_start_failure",
     "i2c_symbol_failure", "i2c_disable_failure", "long_holdover",
 ]
@@ -80,7 +80,7 @@ def decode_frame(tones):
     longitude = 179 - location // 180
     latitude = location % 180
     grid = chr(65 + longitude // 10) + chr(65 + latitude // 10) + str(longitude % 10) + str(latitude % 10)
-    return {"callsign": callsign, "grid": grid, "power_dbm": power - 64}
+    return {"callsign": callsign, "grid": grid, "payload": location, "power_dbm": power - 64}
 
 
 def check_report(report):
@@ -95,26 +95,30 @@ def check_report(report):
     expected_starts = [11, 131]
     expected_grids = ["JN58", "JN58"]
     if name in {"no_inputs", "usb_waiting", "time_only", "location_only", "malformed",
-                "i2c_init_failure", "i2c_start_failure"}:
+                "i2c_init_failure", "i2c_start_failure", "no_altitude"}:
         expected_starts = expected_grids = []
     elif name == "serial_only":
         expected_grids = [report["fallback_grid"]] * 2
     elif name == "gps_during_serial_frame":
         expected_starts, expected_grids = [1, 131], [report["fallback_grid"], "JN58"]
-    elif name in {"moving", "gps_reacquire"}:
-        expected_grids = ["JN58", "FN41"]
-    elif name == "near_slot_after":
+    elif name in {"moving", "gps_priority"}:
+        expected_starts = list(range(11, 612, 120))
+        expected_grids = ["JN58"] * 3 + (["FN41"] * 3 if name == "moving" else ["JN58"] * 3)
+    elif name == "gps_late_reacquire":
+        expected_starts = [11, 131, 251, 491, 611, 731]
+        expected_grids = ["JN58"] * 3 + ["FN41"] * 3
+    elif name in {"near_slot_after", "altitude_after_slot"}:
         expected_starts, expected_grids = [131], ["JN58"]
     elif name in {"i2c_symbol_failure", "i2c_disable_failure"}:
         expected_starts, expected_grids = [11], ["JN58"]
-    elif name == "long_holdover":
-        expected_starts = list(range(11, 1200, 120))
+    elif name in {"long_holdover", "gps_loss", "gps_silent"}:
+        expected_starts = [11, 131, 251]
         expected_grids = ["JN58"] * len(expected_starts)
     assert len(frames) == len(expected_starts), f"expected {len(expected_starts)} frames, got {len(frames)}"
     assert report["outputs_ever_enabled"] == (1 if frames else 0)
     max_boundary_error = 0
     decoded = []
-    for frame, start, grid in zip(frames, expected_starts, expected_grids):
+    for frame_index, (frame, start, grid) in enumerate(zip(frames, expected_starts, expected_grids)):
         # UART start capture, polling and I2C wire time introduce sub-ms error.
         assert abs(frame["start_us"] - start * 1_000_000) <= 3000, frame["start_us"]
         if name == "i2c_symbol_failure":
@@ -122,8 +126,18 @@ def check_report(report):
             assert 1 < len(frame["tones"]) < 162
             continue
         decoded.append(decode_frame(frame["tones"]))
-        assert decoded[-1] == {"callsign": report["callsign"].upper(), "grid": grid,
-                               "power_dbm": report["power_dbm"]}, decoded[-1]
+        gps_index = frame_index - (1 if name == "gps_during_serial_frame" else 0)
+        phase = gps_index % 3 if name != "serial_only" and gps_index >= 0 else 0
+        call = report[["callsign", "callsign_fine", "callsign_alt"][phase]].upper()
+        assert decoded[-1]["callsign"] == call, decoded[-1]
+        assert decoded[-1]["power_dbm"] == report["power_dbm"]
+        if phase == 0:
+            assert decoded[-1]["grid"] == grid, decoded[-1]
+        elif phase == 1:
+            # Munich: 11°31' E, 48°7.038' N => offsets (136, 21).
+            assert decoded[-1]["payload"] == (0 if grid == "FN41" else 136 * 180 + 21), decoded[-1]
+        else:
+            assert decoded[-1]["payload"] == (457 if grid == "FN41" else 123), decoded[-1]
         for index, (at, _) in enumerate(frame["tones"]):
             error = abs(at - frame["start_us"] - index * 8192000000 // 12000)
             max_boundary_error = max(max_boundary_error, error)

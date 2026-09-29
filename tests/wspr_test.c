@@ -56,6 +56,7 @@ static void test_gps_and_schedule(void) {
     assert(!wspr_beacon_use_gps(&schedule, &gps, 1000));
     assert(strcmp(schedule.grid, WSPR_FALLBACK_GRID) == 0);
 
+    parse(&gps, "GPGGA,120000,4807.038,N,01131.000,E,1,08,1.0,123,M,0,M,,", 10000000);
     parse(&gps, "GPRMC,120000.250,A,4807.038,N,01131.000,E,0,0,050926,,,A", 10000000);
     assert(gps.have_utc_time && gps.have_coordinates);
     assert(gps.utc_microsecond == 250000);
@@ -200,7 +201,72 @@ static void test_transition_logs(void) {
     assert(log_lines == 6);
 }
 
+static void test_telemetry(void) {
+    char grid[5];
+    uint16_t coarse, fine, alt;
+    assert(wspr_location_payloads(48.5, 11.0, 123.5, grid, &coarse, &fine, &alt));
+    assert(strcmp(grid, "JN58") == 0 && fine == 90 * 180 + 90 && alt == 124);
+    assert(wspr_location_payloads(48, 10, -3, grid, &coarse, &fine, &alt));
+    assert(fine == 0 && alt == 0);
+    assert(wspr_location_payloads(48.999999, 11.999999, 40000, grid, &coarse, &fine, &alt));
+    assert(fine == 32399 && alt == 32767);
+    assert(wspr_location_payloads(49, 12, 123.49, grid, &coarse, &fine, &alt));
+    assert(strcmp(grid, "JN69") == 0 && fine == 0 && alt == 123);
+    assert(wspr_location_payloads(-89.5, -179, 0, grid, &coarse, &fine, &alt));
+    assert(strcmp(grid, "AA00") == 0 && fine == 16290);
+    assert(!wspr_location_payloads(90, 0, 0, grid, &coarse, &fine, &alt));
+    assert(!wspr_location_payloads(0, 0, NAN, grid, &coarse, &fine, &alt));
+    uint32_t n1, n2, standard1, standard2;
+    uint8_t symbols[162], standard[162];
+    assert(wspr_grid_payload("FN30", &coarse));
+    assert(wspr_pack_message("K1ABC", "FN30", 10, &standard1, &standard2));
+    assert(wspr_pack_payload("K1ABC", coarse, 10, &n1, &n2));
+    assert(n1 == standard1 && n2 == standard2);
+    assert(wspr_encode("K1ABC", "FN30", 10, standard));
+    assert(wspr_encode_payload("K1ABC", coarse, 10, symbols));
+    assert(memcmp(symbols, standard, sizeof(symbols)) == 0);
+    assert(wspr_pack_payload(WSPR_CALLSIGN_ALT, 32767, 10, &n1, &n2));
+    assert((n2 >> 7) == 32767 && (n2 & 127) == 74);
+    assert(!wspr_pack_payload(WSPR_CALLSIGN_ALT, 32768, 10, &n1, &n2));
+
+    c90770_gps_monitor_state_t gps = {.quiet = true};
+    wspr_beacon_schedule_t schedule = {.grid = WSPR_FALLBACK_GRID};
+    parse(&gps, "GPGGA,120000,4830.000,N,01100.000,E,1,08,1,123.5,M,0,M,,", 0);
+    /* RMC coordinates deliberately differ; the telemetry must use GGA's fix. */
+    parse(&gps, "GPRMC,120000,A,4900.000,N,01200.000,E,0,0,050926,,,A", 0);
+    assert(wspr_beacon_use_gps(&schedule, &gps, 0));
+    assert(schedule.gps_mode);
+    assert(!wspr_beacon_should_start(&schedule, false, true, 0));
+    const char *call;
+    uint16_t payload;
+    assert(wspr_beacon_message(&schedule, &gps, 1000000, &call, &payload));
+    assert(strcmp(call, WSPR_CALLSIGN) == 0 && strcmp(schedule.snapshot_grid, "JN58") == 0);
+    wspr_beacon_did_start(&schedule, 1000000);
+    gps.have_coordinates = false;
+    gps.fix_altitude = 999;
+    assert(wspr_beacon_message(&schedule, &gps, 121000000, &call, &payload));
+    assert(strcmp(call, WSPR_CALLSIGN_FINE) == 0 && payload == 16290);
+    wspr_beacon_did_start(&schedule, 121000000);
+    assert(wspr_beacon_message(&schedule, &gps, 241000000, &call, &payload));
+    assert(strcmp(call, WSPR_CALLSIGN_ALT) == 0 && payload == 124);
+    wspr_beacon_did_start(&schedule, 241000000);
+    assert(!wspr_beacon_message(&schedule, &gps, 361000000, &call, &payload));
+    assert(schedule.phase == 0 && schedule.next_start == 481000000);
+    assert(!wspr_beacon_should_start(&schedule, false, true, 362000000));
+    parse(&gps, "GPRMC,120600,A,4900.000,N,01200.000,E,0,0,050926,,,A", 362000000);
+    assert(!wspr_gps_fix_fresh(&gps, 362000000)); // Fresh RMC, stale GGA.
+    parse(&gps, "GPGGA,120600,4900.000,N,01200.000,E,1,08,1,456,M,0,M,,", 362000000);
+    assert(wspr_beacon_use_gps(&schedule, &gps, 362000000));
+    assert(wspr_beacon_message(&schedule, &gps, 363000000, &call, &payload));
+    assert(strcmp(schedule.snapshot_grid, "JN69") == 0 && schedule.payloads[2] == 456);
+    parse(&gps, "GPGGA,120600,4900.000,N,01200.000,E,1,08,1,nan,M,0,M,,", 362000000);
+    assert(!gps.have_complete_fix && !gps.have_altitude);
+    parse(&gps, "GPGGA,120600,4900.000,N,01200.000,E,1,08,1,bad,M,0,M,,", 362000000);
+    assert(!gps.have_complete_fix);
+}
+
 int main(void) {
+    test_telemetry();
     test_stream();
     test_gps_and_schedule();
     test_transmitter();

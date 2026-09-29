@@ -137,6 +137,11 @@ typedef struct {
     double longitude_degrees;
     double altitude_meters;
     bool have_altitude;
+    /* A complete GGA fix is retained separately: RMC must not mix newer
+     * coordinates with altitude from a different measurement. */
+    bool have_complete_fix;
+    double fix_latitude, fix_longitude, fix_altitude;
+    absolute_time_t fix_captured_at;
     int fix_quality;
     int fix_type;
     int satellites_used;
@@ -529,7 +534,11 @@ static inline void c90770_handle_gsv(c90770_gps_monitor_state_t *state, char **f
     }
 }
 
-static inline void c90770_handle_gga(c90770_gps_monitor_state_t *state, char **fields, size_t field_count) {
+static inline void c90770_handle_gga(
+    c90770_gps_monitor_state_t *state, char **fields, size_t field_count,
+    absolute_time_t captured_at
+) {
+    state->have_complete_fix = false;
     if (field_count < 10u) {
         return;
     }
@@ -545,9 +554,18 @@ static inline void c90770_handle_gga(c90770_gps_monitor_state_t *state, char **f
     if (state->have_coordinates) {
         memcpy(state->fix_source, "GGA", 4u);
 
-        if (fields[9][0] != '\0') {
-            state->altitude_meters = c90770_parse_double_field(fields[9], 0.0);
-            state->have_altitude = true;
+        if (field_count > 10u && fields[9][0] != '\0' && strcmp(fields[10], "M") == 0) {
+            char *end;
+            double altitude = strtod(fields[9], &end);
+            if (*end == '\0' && isfinite(altitude)) {
+                state->altitude_meters = altitude;
+                state->have_altitude = true;
+                state->fix_latitude = state->latitude_degrees;
+                state->fix_longitude = state->longitude_degrees;
+                state->fix_altitude = altitude;
+                state->fix_captured_at = captured_at;
+                state->have_complete_fix = true;
+            }
         }
     }
 
@@ -653,7 +671,7 @@ static inline void c90770_parse_gps_line_at(
     if (strcmp(sentence_type, "GSV") == 0) {
         c90770_handle_gsv(state, fields, field_count);
     } else if (strcmp(sentence_type, "GGA") == 0) {
-        c90770_handle_gga(state, fields, field_count);
+        c90770_handle_gga(state, fields, field_count, captured_at);
     } else if (strcmp(sentence_type, "RMC") == 0) {
         c90770_handle_rmc(state, fields, field_count, captured_at);
     } else if (strcmp(sentence_type, "GSA") == 0) {

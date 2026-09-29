@@ -118,23 +118,39 @@ static void wspr_monitor_gps(void) {
 typedef struct {
     bool armed;
     bool gps_slot_selected;
+    bool gps_mode;
+    unsigned phase; /* Next GPS message: coarse, fine, altitude. */
+    uint16_t payloads[3];
+    char snapshot_grid[5];
     absolute_time_t next_start;
     char grid[5];
 } wspr_beacon_schedule_t;
 
-/* Called only between frames. Retain the last grid/clock if reception is lost;
- * before either source synchronizes us, the placeholder never starts RF. */
+static inline bool wspr_gps_fix_fresh(
+    const c90770_gps_monitor_state_t *gps, absolute_time_t now
+) {
+    int64_t age = absolute_time_diff_us(gps->fix_captured_at, now);
+    int64_t utc_age = absolute_time_diff_us(gps->utc_captured_at, now);
+    return gps->have_coordinates && gps->have_complete_fix && gps->have_utc_time &&
+        age >= 0 && age < WSPR_GPS_FRESH_US &&
+        utc_age >= 0 && utc_age < WSPR_GPS_FRESH_US;
+}
+
+/* Called only between frames. Once GPS takes over, serial stays ignored even
+ * during GPS loss. The current sequence retains its own immutable payloads. */
 static inline bool wspr_beacon_use_gps(
     wspr_beacon_schedule_t *schedule, const c90770_gps_monitor_state_t *gps,
     absolute_time_t now
 ) {
     int64_t age = absolute_time_diff_us(gps->utc_captured_at, now);
     char grid[5];
-    if (!gps->have_coordinates || !gps->have_utc_time || age < 0ll ||
+    if ((!schedule->gps_mode && !wspr_gps_fix_fresh(gps, now)) ||
+        !gps->have_coordinates || !gps->have_utc_time || age < 0ll ||
         age >= WSPR_GPS_FRESH_US ||
         !wspr_grid_from_coordinates(gps->latitude_degrees, gps->longitude_degrees, grid)) {
         return false;
     }
+    schedule->gps_mode = true;
     memcpy(schedule->grid, grid, sizeof(schedule->grid));
     if (!schedule->gps_slot_selected) {
         schedule->next_start = wspr_next_utc_slot_at(gps, now);
@@ -148,17 +164,45 @@ static inline bool wspr_beacon_should_start(
     const wspr_beacon_schedule_t *schedule, bool transmitting, bool trigger,
     absolute_time_t now
 ) {
-    return !transmitting && (trigger || (schedule->armed &&
+    return !transmitting && ((trigger && !schedule->gps_mode) || (schedule->armed &&
         absolute_time_diff_us(schedule->next_start, now) >= 0ll));
 }
 
 static inline void wspr_beacon_did_start(
     wspr_beacon_schedule_t *schedule, absolute_time_t start
 ) {
+    if (schedule->gps_mode) schedule->phase = (schedule->phase + 1u) % 3u;
     schedule->armed = true;
     schedule->next_start = delayed_by_us(start, WSPR_SLOT_PERIOD_US);
     /* Select the next slot from the newest fix after this frame completes. */
     schedule->gps_slot_selected = false;
+}
+
+/* Called at the slot, so a fix that went stale while waiting cannot launch
+ * a new sequence. Missing fixes skip this slot without advancing the phase. */
+static inline bool wspr_beacon_message(
+    wspr_beacon_schedule_t *schedule, const c90770_gps_monitor_state_t *gps,
+    absolute_time_t now, const char **callsign, uint16_t *payload
+) {
+    static const char *const callsigns[] = {
+        WSPR_CALLSIGN, WSPR_CALLSIGN_FINE, WSPR_CALLSIGN_ALT
+    };
+    if (!schedule->gps_mode) {
+        *callsign = WSPR_CALLSIGN;
+        return wspr_grid_payload(schedule->grid, payload);
+    }
+    if (schedule->phase == 0u &&
+        (!wspr_gps_fix_fresh(gps, now) ||
+         !wspr_location_payloads(gps->fix_latitude, gps->fix_longitude,
+             gps->fix_altitude, schedule->snapshot_grid, &schedule->payloads[0],
+             &schedule->payloads[1], &schedule->payloads[2]))) {
+        schedule->next_start = delayed_by_us(schedule->next_start, WSPR_SLOT_PERIOD_US);
+        schedule->gps_slot_selected = false;
+        return false;
+    }
+    *callsign = callsigns[schedule->phase];
+    *payload = schedule->payloads[schedule->phase];
+    return true;
 }
 
 static inline void wspr_stop_on_error(si5351a_i2c_t *clock, const char *reason) {
@@ -196,12 +240,15 @@ static inline void wspr_run_beacon(void) {
 
     wspr_beacon_schedule_t schedule = {.grid = WSPR_FALLBACK_GRID};
     wspr_transmitter_t tx = {0};
+    const char *last_callsign = WSPR_CALLSIGN;
+    uint16_t last_payload = 0u;
+    wspr_grid_payload(schedule.grid, &last_payload);
     if (!wspr_prepare(&clock, &tx, WSPR_CALLSIGN, schedule.grid, WSPR_POWER_DBM)) {
         wspr_stop_on_error(&clock, "preparation failed; check station fields and Si5351A");
     }
     printf("WSPR RF STATE: NOT TRANSMITTING; base=%lu Hz callsign=%s power=%u dBm\n",
            (unsigned long)WSPR_BASE_HZ, WSPR_CALLSIGN, (unsigned)WSPR_POWER_DBM);
-    printf("WSPR waiting for serial 'g' or GPS UTC + location; placeholder grid=%s\n",
+    printf("WSPR waiting for serial 'g' or GPS UTC + location + altitude; placeholder grid=%s\n",
            schedule.grid);
 
     static c90770_gps_monitor_state_t gps;
@@ -213,9 +260,9 @@ static inline void wspr_run_beacon(void) {
         if (connected && !usb_connected) {
             /* Boot logs may predate the terminal opening. A connection is a
              * transition too: show the current state once, without heartbeats. */
-            printf("WSPR STATUS: RF=%s; base=%lu Hz; %s %s %u dBm; schedule=%s\n",
+            printf("WSPR STATUS: RF=%s; base=%lu Hz; last/prepared=%s payload=%u %u dBm; schedule=%s\n",
                    tx.active ? "TRANSMITTING" : "NOT TRANSMITTING",
-                   (unsigned long)WSPR_BASE_HZ, WSPR_CALLSIGN, schedule.grid,
+                   (unsigned long)WSPR_BASE_HZ, last_callsign, (unsigned)last_payload,
                    (unsigned)WSPR_POWER_DBM, schedule.armed ? "armed" : "waiting for 'g' or GPS");
             mutex_enter_blocking(&wspr_gps_mutex);
             wspr_gps_log_requested = true;
@@ -239,9 +286,6 @@ static inline void wspr_run_beacon(void) {
             if (!tx.active) {
                 printf("WSPR RF STATE: NOT TRANSMITTING (frame complete)\n");
                 refresh_gps = true;
-                if (!wspr_prepare(&clock, &tx, WSPR_CALLSIGN, schedule.grid, WSPR_POWER_DBM)) {
-                    wspr_stop_on_error(&clock, "preparation failed");
-                }
             }
         } else {
             bool changed = false;
@@ -260,9 +304,6 @@ static inline void wspr_run_beacon(void) {
                 bool had_gps_slot = schedule.gps_slot_selected;
                 if (wspr_beacon_use_gps(&schedule, &gps, get_absolute_time())) {
                     if (memcmp(previous_grid, schedule.grid, sizeof(previous_grid)) != 0) {
-                        if (!wspr_prepare(&clock, &tx, WSPR_CALLSIGN, schedule.grid, WSPR_POWER_DBM)) {
-                            wspr_stop_on_error(&clock, "preparation failed after GPS grid update");
-                        }
                         printf("WSPR LOCATION: %s -> %s (GPS)\n", previous_grid, schedule.grid);
                     }
                     if (!had_gps_slot) {
@@ -274,15 +315,26 @@ static inline void wspr_run_beacon(void) {
             }
             absolute_time_t now = get_absolute_time();
             if (wspr_beacon_should_start(&schedule, false, trigger, now)) {
-                const char *source = trigger ? "serial trigger" :
-                    (schedule.gps_slot_selected ? "GPS slot" : "clock holdover");
+                const char *source = schedule.gps_mode ? "GPS sequence" : "serial schedule";
+                const char *callsign;
+                uint16_t payload;
+                if (!wspr_beacon_message(&schedule, &gps, now, &callsign, &payload)) {
+                    printf("WSPR skipped slot: waiting for fresh GPS UTC + location + altitude\n");
+                    continue;
+                }
+                if (!wspr_prepare_payload(&clock, &tx, callsign, payload, WSPR_POWER_DBM)) {
+                    wspr_stop_on_error(&clock, "preparation failed");
+                }
+                now = get_absolute_time();
                 if (!wspr_start(&clock, &tx, now)) {
                     wspr_stop_on_error(&clock, "start failed");
                 }
+                last_callsign = callsign;
+                last_payload = payload;
+                printf("WSPR RF STATE: TRANSMITTING (%s): %s type=%u payload=%u %u dBm\n",
+                       source, callsign, schedule.gps_mode ? schedule.phase : 0u,
+                       (unsigned)payload, (unsigned)WSPR_POWER_DBM);
                 wspr_beacon_did_start(&schedule, now);
-                printf("WSPR RF STATE: TRANSMITTING (%s): %s %s %u dBm\n",
-                       source,
-                       WSPR_CALLSIGN, schedule.grid, (unsigned)WSPR_POWER_DBM);
             }
         }
         sleep_us(100u);

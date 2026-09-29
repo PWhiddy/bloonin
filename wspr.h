@@ -32,17 +32,19 @@
  * identities. */
 #ifndef WSPR_CALLSIGN
 #define WSPR_CALLSIGN "ZL3XYZ"
+#endif
 
 #ifndef WSPR_CALLSIGN_FINE
 #define WSPR_CALLSIGN_FINE "ZL3XYF"
+#endif
 
 #ifndef WSPR_CALLSIGN_ALT
 #define WSPR_CALLSIGN_ALT "ZL3XYA"
 
 #endif
 #ifndef WSPR_FALLBACK_GRID
-#define WSPR_FALLBACK_GRID "FN30"
-// "AA00"
+#define WSPR_FALLBACK_GRID "AA00"
+// "FN30"
 #endif
 #ifndef WSPR_POWER_DBM
 #define WSPR_POWER_DBM 10u
@@ -111,25 +113,14 @@ static inline uint8_t wspr_call_first_code(char c) {
     return 36u;
 }
 
-static inline bool wspr_pack_message(
-    const char *callsign,
-    const char grid[4],
-    uint8_t power_dbm,
-    uint32_t *n1,
-    uint32_t *n2
+/* The locator field can carry any unsigned 15-bit telemetry payload. */
+static inline bool wspr_pack_payload(
+    const char *callsign, uint16_t payload, uint8_t power_dbm,
+    uint32_t *n1, uint32_t *n2
 ) {
     char call[6];
-    if (!wspr_normalize_callsign(callsign, call) || !wspr_valid_power(power_dbm)) {
-        return false;
-    }
-    char g0 = wspr_upper(grid[0]);
-    char g1 = wspr_upper(grid[1]);
-    char g2 = grid[2];
-    char g3 = grid[3];
-    if (g0 < 'A' || g0 > 'R' || g1 < 'A' || g1 > 'R' ||
-        g2 < '0' || g2 > '9' || g3 < '0' || g3 > '9') {
-        return false;
-    }
+    if (payload > 32767u || !wspr_normalize_callsign(callsign, call) ||
+        !wspr_valid_power(power_dbm)) return false;
 
     uint32_t packed_call = wspr_call_first_code(call[0]);
     packed_call = 36u * packed_call + wspr_call_first_code(call[1]);
@@ -138,16 +129,33 @@ static inline bool wspr_pack_message(
     packed_call = 27u * packed_call + (uint32_t)(call[4] == ' ' ? 26 : call[4] - 'A');
     packed_call = 27u * packed_call + (uint32_t)(call[5] == ' ' ? 26 : call[5] - 'A');
 
-    uint32_t packed_grid = (uint32_t)(179 - 10 * (g0 - 'A') - (g2 - '0')) * 180u;
-    packed_grid += (uint32_t)(10 * (g1 - 'A') + (g3 - '0'));
     *n1 = packed_call;
-    *n2 = (packed_grid << 7) | 0x40u | power_dbm;
+    *n2 = ((uint32_t)payload << 7) | 0x40u | power_dbm;
     return true;
 }
 
-static inline bool wspr_encode(
+static inline bool wspr_grid_payload(const char grid[4], uint16_t *payload) {
+    char g0 = wspr_upper(grid[0]), g1 = wspr_upper(grid[1]);
+    char g2 = grid[2], g3 = grid[3];
+    if (g0 < 'A' || g0 > 'R' || g1 < 'A' || g1 > 'R' ||
+        g2 < '0' || g2 > '9' || g3 < '0' || g3 > '9') return false;
+    *payload = (uint16_t)((179 - 10 * (g0 - 'A') - (g2 - '0')) * 180 +
+                         10 * (g1 - 'A') + (g3 - '0'));
+    return true;
+}
+
+static inline bool wspr_pack_message(
+    const char *callsign, const char grid[4], uint8_t power_dbm,
+    uint32_t *n1, uint32_t *n2
+) {
+    uint16_t payload;
+    return wspr_grid_payload(grid, &payload) &&
+        wspr_pack_payload(callsign, payload, power_dbm, n1, n2);
+}
+
+static inline bool wspr_encode_payload(
     const char *callsign,
-    const char grid[4],
+    uint16_t payload,
     uint8_t power_dbm,
     uint8_t symbols[WSPR_SYMBOL_COUNT]
 ) {
@@ -164,7 +172,7 @@ static inline bool wspr_encode(
     uint32_t n1 = 0u;
     uint32_t n2 = 0u;
     uint8_t convolutional[WSPR_SYMBOL_COUNT];
-    if (!wspr_pack_message(callsign, grid, power_dbm, &n1, &n2)) {
+    if (!wspr_pack_payload(callsign, payload, power_dbm, &n1, &n2)) {
         return false;
     }
 
@@ -194,6 +202,15 @@ static inline bool wspr_encode(
     return true;
 }
 
+static inline bool wspr_encode(
+    const char *callsign, const char grid[4], uint8_t power_dbm,
+    uint8_t symbols[WSPR_SYMBOL_COUNT]
+) {
+    uint16_t payload;
+    return wspr_grid_payload(grid, &payload) &&
+        wspr_encode_payload(callsign, payload, power_dbm, symbols);
+}
+
 static inline bool wspr_grid_from_coordinates(double latitude, double longitude, char grid[5]) {
     if (!isfinite(latitude) || !isfinite(longitude) ||
         latitude < -90.0 || latitude >= 90.0 || longitude < -180.0 || longitude >= 180.0) {
@@ -216,6 +233,26 @@ static inline bool wspr_grid_from_coordinates(double latitude, double longitude,
     return true;
 }
 
+/* Fine indices are offsets east/north within this exact 2 x 1 degree cell. */
+static inline bool wspr_location_payloads(
+    double latitude, double longitude, double altitude, char grid[5],
+    uint16_t *coarse, uint16_t *fine, uint16_t *alt
+) {
+    if (!isfinite(altitude) || !wspr_grid_from_coordinates(latitude, longitude, grid))
+        return false;
+    double west = -180.0 + 20.0 * (grid[0] - 'A') + 2.0 * (grid[2] - '0');
+    double south = -90.0 + 10.0 * (grid[1] - 'A') + (grid[3] - '0');
+    unsigned x = (unsigned)((longitude - west) * 90.0);
+    unsigned y = (unsigned)((latitude - south) * 180.0);
+    /* Protect against rounding at the upper cell edge. */
+    if (x > 179u) x = 179u;
+    if (y > 179u) y = 179u;
+    *fine = (uint16_t)(x * 180u + y);
+    *alt = altitude <= 0.0 ? 0u : altitude >= 32767.0 ? 32767u :
+        (uint16_t)(altitude + 0.5);
+    return wspr_grid_payload(grid, coarse);
+}
+
 typedef struct {
     uint32_t p1, p2, p3;
 } wspr_tone_t;
@@ -234,13 +271,13 @@ static inline uint64_t wspr_symbol_offset_us(uint32_t symbol) {
 }
 
 /* Prepare while RF is off so a trigger only needs the output-enable write. */
-static inline bool wspr_prepare(
+static inline bool wspr_prepare_payload(
     si5351a_i2c_t *clock, wspr_transmitter_t *tx,
-    const char *callsign, const char grid[4], uint8_t power_dbm
+    const char *callsign, uint16_t payload, uint8_t power_dbm
 ) {
     tx->active = false;
     if (!si5351a_i2c_set_clk0_enabled(clock, false) ||
-        !wspr_encode(callsign, grid, power_dbm, tx->symbols)) {
+        !wspr_encode_payload(callsign, payload, power_dbm, tx->symbols)) {
         return false;
     }
     for (uint32_t i = 0; i < 4u; ++i) {
@@ -255,6 +292,15 @@ static inline bool wspr_prepare(
     const wspr_tone_t *tone = &tx->tones[tx->symbols[0]];
     return si5351a_i2c_write_multisynth(
         clock, 42u, tone->p1, tone->p2, tone->p3, 0u, false);
+}
+
+static inline bool wspr_prepare(
+    si5351a_i2c_t *clock, wspr_transmitter_t *tx,
+    const char *callsign, const char grid[4], uint8_t power_dbm
+) {
+    uint16_t payload;
+    return wspr_grid_payload(grid, &payload) &&
+        wspr_prepare_payload(clock, tx, callsign, payload, power_dbm);
 }
 
 static inline bool wspr_start(
