@@ -31,7 +31,8 @@
 /* These defaults are syntactically valid WSPR type-1 fields, not station
  * identities.  Set WSPR_CALLSIGN and WSPR_POWER_DBM for the licensed station. */
 #ifndef WSPR_CALLSIGN
-#define WSPR_CALLSIGN "K1ABC"
+#define WSPR_CALLSIGN "ZL3XYZ"
+//"K1ABC"
 #endif
 #ifndef WSPR_FALLBACK_GRID
 #define WSPR_FALLBACK_GRID "FN30"

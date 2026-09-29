@@ -1,6 +1,10 @@
 #ifndef TEST_PICO_H
 #define TEST_PICO_H
 
+#ifdef WSPR_SIMULATION
+#include "../sim_pico.h"
+#else
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -25,6 +29,8 @@ static uint8_t test_registers[256];
 static unsigned test_writes;
 static bool test_fail_write;
 static bool test_rf_enabled_during_init;
+static uint8_t test_outputs_ever_enabled;
+static bool test_unused_output_powered_up;
 
 static inline absolute_time_t get_absolute_time(void) { return test_now; }
 static inline absolute_time_t delayed_by_us(absolute_time_t t, int64_t us) { return t + us; }
@@ -44,6 +50,10 @@ static inline int i2c_write_blocking(i2c_inst_t *i, uint8_t addr, const uint8_t 
     for (size_t j = 1; j < n; ++j) {
         test_registers[data[0] + j - 1] = data[j];
         if (data[0] + j - 1 == 3 && !(data[j] & 1u)) test_rf_enabled_during_init = true;
+    }
+    test_outputs_ever_enabled |= (uint8_t)~test_registers[3];
+    for (unsigned output = 1; output < 8; ++output) {
+        if (!(test_registers[16 + output] & 0x80u)) test_unused_output_powered_up = true;
     }
     return (int)n;
 }
@@ -73,4 +83,5 @@ void mutex_exit(mutex_t *m);
 void multicore_launch_core1(void (*entry)(void));
 bool stdio_usb_connected(void);
 
+#endif
 #endif

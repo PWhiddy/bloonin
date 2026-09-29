@@ -368,8 +368,9 @@ static inline bool si5351a_i2c_update_clk0_frequency_ratio(
 }
 
 static inline bool si5351a_i2c_set_clk0_enabled(si5351a_i2c_t *clock, bool enabled) {
-    /* CLK1 is left as configured; this project uses CLK0 as the RF output. */
-    return si5351a_i2c_write_reg(clock, 3u, enabled ? 0xfcu : 0xfdu);
+    /* Output enables are active low. Only CLK0 is used: idle disables every
+     * output, and transmitting must not enable any of CLK1..CLK7. */
+    return si5351a_i2c_write_reg(clock, 3u, enabled ? 0xfeu : 0xffu);
 }
 
 static inline void si5351a_i2c_init_bus(
@@ -462,17 +463,9 @@ static inline bool si5351a_i2c_configure_output_hz_enabled(
         si5351a_i2c_set_error(clock, SI5351A_ERROR_MS0_CONFIG_FAILED, 42u);
         return false;
     }
-    if (!si5351a_i2c_write_multisynth(clock, 50u, ms0_p1, ms0_p2, ms0_p3, 0u, false)) {
-        si5351a_i2c_set_error(clock, SI5351A_ERROR_MS1_CONFIG_FAILED, 50u);
-        return false;
-    }
-
+    /* Leave unused CLK1..CLK7 powered down by the register 16..23 loop above. */
     if (!si5351a_i2c_write_reg(clock, 16u, (uint8_t)(0x0cu | (SI5351A_CLK0_DRIVE & 0x03u)))) {
         si5351a_i2c_set_error(clock, SI5351A_ERROR_CLK0_CONTROL_FAILED, 16u);
-        return false;
-    }
-    if (!si5351a_i2c_write_reg(clock, 17u, (uint8_t)(0x1cu | (SI5351A_CLK0_DRIVE & 0x03u)))) {
-        si5351a_i2c_set_error(clock, SI5351A_ERROR_CLK1_CONTROL_FAILED, 17u);
         return false;
     }
     if (!si5351a_i2c_write_reg(clock, 177u, 0x20u)) {
@@ -480,8 +473,9 @@ static inline bool si5351a_i2c_configure_output_hz_enabled(
         return false;
     }
 
-    if (!si5351a_i2c_write_reg(clock, 3u, enabled ? 0xfcu : 0xffu)) {
-        si5351a_i2c_set_error(clock, SI5351A_ERROR_ENABLE_CLK0_CLK1_FAILED, 3u);
+    if (!si5351a_i2c_set_clk0_enabled(clock, enabled)) {
+        si5351a_i2c_set_error(clock, enabled ? SI5351A_ERROR_ENABLE_CLK0_FAILED :
+                              SI5351A_ERROR_DISABLE_OUTPUTS_FAILED, 3u);
         return false;
     }
 

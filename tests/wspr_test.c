@@ -107,14 +107,20 @@ static void test_transmitter(void) {
     si5351a_i2c_t clock = {0};
     test_now = 0;
     test_rf_enabled_during_init = false;
+    memset(test_registers, 0xff, sizeof(test_registers));
+    test_outputs_ever_enabled = 0;
+    test_unused_output_powered_up = false;
     assert(si5351a_i2c_configure_output_hz_enabled(&clock, WSPR_BASE_HZ, false));
     assert(!test_rf_enabled_during_init);
+    assert(test_outputs_ever_enabled == 0);
+    assert(!test_unused_output_powered_up);
     wspr_transmitter_t tx = {0};
     assert(wspr_prepare(&clock, &tx, "K1ABC", "FN30", 10));
-    assert(test_registers[3] & 1u);
+    assert(test_registers[3] == 0xffu);
+    assert(test_outputs_ever_enabled == 0);
     assert(WSPR_BASE_HZ == 14097100u);
     assert(wspr_start(&clock, &tx, 1000000));
-    assert(!(test_registers[3] & 1u));
+    assert(test_registers[3] == 0xfeu);
     unsigned writes = test_writes;
     test_now = 1682665;
     assert(wspr_poll_transmitter(&clock, &tx));
@@ -140,16 +146,23 @@ static void test_transmitter(void) {
     assert(wspr_poll_transmitter(&clock, &tx) && tx.active);
     test_now = 111592000;
     assert(wspr_poll_transmitter(&clock, &tx) && !tx.active);
-    assert(test_registers[3] & 1u);
+    assert(test_registers[3] == 0xffu);
 
     assert(wspr_prepare(&clock, &tx, "K1ABC", "FN30", 10));
     assert(wspr_start(&clock, &tx, test_now));
     test_now += 682666;
     test_fail_write = true;
     assert(!wspr_poll_transmitter(&clock, &tx));
-    assert(!tx.active && (test_registers[3] & 1u));
+    assert(!tx.active && test_registers[3] == 0xffu);
     assert(!wspr_prepare(&clock, &tx, "BAD", "FN30", 10));
-    assert(test_registers[3] & 1u);
+    assert(test_registers[3] == 0xffu);
+    /* The direct output helper and WSPR share the same CLK0-only policy. */
+    assert(si5351a_i2c_configure_output_hz(&clock, WSPR_BASE_HZ));
+    assert(test_registers[3] == 0xfeu);
+    assert(si5351a_i2c_set_clk0_enabled(&clock, false));
+    assert(test_registers[3] == 0xffu);
+    assert(test_outputs_ever_enabled == 1u);
+    assert(!test_unused_output_powered_up);
 }
 
 static void test_transition_logs(void) {
