@@ -29,10 +29,16 @@
 #define WSPR_TONE_STEP_NUMERATOR 375u
 
 /* These defaults are syntactically valid WSPR type-1 fields, not station
- * identities.  Set WSPR_CALLSIGN and WSPR_POWER_DBM for the licensed station. */
+ * identities. */
 #ifndef WSPR_CALLSIGN
 #define WSPR_CALLSIGN "ZL3XYZ"
-//"K1ABC"
+
+#ifndef WSPR_CALLSIGN_FINE
+#define WSPR_CALLSIGN_FINE "ZL3XYF"
+
+#ifndef WSPR_CALLSIGN_ALT
+#define WSPR_CALLSIGN_ALT "ZL3XYA"
+
 #endif
 #ifndef WSPR_FALLBACK_GRID
 #define WSPR_FALLBACK_GRID "FN30"
