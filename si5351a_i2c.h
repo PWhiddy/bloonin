@@ -21,12 +21,14 @@
 #endif
 
 #ifndef SI5351A_I2C_SDA_GPIO
-#define SI5351A_I2C_SDA_GPIO 0u
+#define SI5351A_I2C_SDA_GPIO 4u
 #endif
+// 0u // old value for breadboard build
 
 #ifndef SI5351A_I2C_SCL_GPIO
-#define SI5351A_I2C_SCL_GPIO 1u
+#define SI5351A_I2C_SCL_GPIO 5u
 #endif
+// 1u // old value for breadboard build
 
 #ifndef SI5351A_I2C_BAUD
 #define SI5351A_I2C_BAUD 400000u
