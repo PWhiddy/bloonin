@@ -265,7 +265,25 @@ static void test_telemetry(void) {
     assert(!gps.have_complete_fix);
 }
 
+static void test_gps_diagnostics(void) {
+    gps_diagnostics_t diag = {0};
+    char hex[97];
+    gps_diagnostics_hex(&diag, hex);
+    assert(strcmp(hex, "") == 0);
+    gps_diagnostics_record(&diag, 0xf00u | 'A', 1000);
+    assert(diag.bytes == 1 && diag.framing == 1 && diag.parity == 1);
+    assert(diag.breaks == 1 && diag.overruns == 1 && diag.last_byte == 1000);
+    gps_diagnostics_hex(&diag, hex);
+    assert(strcmp(hex, "41 ") == 0);
+    for (unsigned i = 0; i < 40u; ++i) gps_diagnostics_record(&diag, i, 2000 + i);
+    gps_diagnostics_hex(&diag, hex);
+    assert(diag.bytes == 41 && diag.count == 32 && diag.framing == 1);
+    assert(strlen(hex) == 96 && strncmp(hex, "08 09 0A ", 9) == 0);
+    assert(strcmp(hex + 87, "25 26 27 ") == 0);
+}
+
 int main(void) {
+    test_gps_diagnostics();
     test_telemetry();
     test_stream();
     test_gps_and_schedule();

@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = [
+    "diag_no_data", "diag_uart_errors",
     "no_altitude", "gps_priority", "gps_late_reacquire", "no_inputs", "usb_waiting", "gps_no_usb", "gps_usb", "serial_only",
     "simultaneous", "gps_during_serial_frame", "gps_loss", "gps_silent",
     "gps_reacquire", "moving", "midnight", "fractional", "near_slot_before",
@@ -92,10 +93,30 @@ def check_report(report):
     assert report["uart_read"] == report["uart_bytes"], "GPS monitoring stopped early"
     logs = sorted(report["logs"], key=lambda item: item["at_us"])
     texts = [item["text"] for item in logs]
+    if name.startswith("diag_"):
+        diagnostics = [t for t in texts if t.startswith("GPS DIAG:")]
+        assert len(diagnostics) == 6, diagnostics
+        summary = diagnostics[0]
+        assert "sentences=0 checksum_failures=0" in summary
+        if name == "diag_no_data":
+            assert "bytes=0" in summary and "last_byte_ms=-1" in summary
+            assert "framing=0 parity=0 breaks=0 overruns=0" in summary
+            assert "none" in diagnostics[1]
+        else:
+            assert "bytes=3" in summary
+            assert "framing=3 parity=3 breaks=3 overruns=3" in summary
+            assert "FF 55 7F" in diagnostics[1]
+        assert all(any(label in t for t in diagnostics) for label in
+                   ("GPS_RX", "GPS_LSWITCH", "GPS_RESET", "GPS_V_BCKP"))
+        assert any("GPS_LSWITCH GP2 digital=0 function=5 sio_dir=out" in t for t in diagnostics)
+    if name == "gps_priority":
+        diagnostics = [log for log in logs if log["text"].startswith("GPS DIAG:")]
+        assert len(diagnostics) == 6
+        assert all(20_000_000 <= log["at_us"] < 20_010_000 for log in diagnostics)
     expected_starts = [11, 131]
     expected_grids = ["JN58", "JN58"]
     if name in {"no_inputs", "usb_waiting", "time_only", "location_only", "malformed",
-                "i2c_init_failure", "i2c_start_failure", "no_altitude"}:
+                "i2c_init_failure", "i2c_start_failure", "no_altitude", "diag_no_data", "diag_uart_errors"}:
         expected_starts = expected_grids = []
     elif name == "serial_only":
         expected_grids = [report["fallback_grid"]] * 2

@@ -40,6 +40,9 @@ static struct {
     bool usb, usb_cycle, usb_blocked, gps;
     bool time_only, location_only, malformed, fractional, midnight;
     bool noisy, moving, silence, reacquire, no_altitude;
+    bool gps_reset_initialized, gps_reset_released;
+    bool gps_power_initialized, gps_power_low_preloaded, gps_power_enabled;
+    int64_t gps_power_enabled_at;
     int64_t fix_at, loss_at, recover_at, move_at;
     int64_t first_sentence;
     const char *fault;
@@ -131,13 +134,50 @@ static void *run_core0(void *unused) {
     abort();
 }
 
-void gpio_init(uint pin) { (void)pin; }
-void gpio_put(uint pin, bool value) { (void)pin; (void)value; }
-void gpio_set_dir(uint pin, bool output) { (void)pin; (void)output; }
+bool gpio_get(uint pin) { return pin == C90770_UART_RX_GPIO; }
+uint gpio_get_function(uint pin) {
+    return pin == C90770_UART_RX_GPIO ? GPIO_FUNC_UART :
+        ((pin == C90770_RESET_GPIO && sim.gps_reset_initialized) ||
+         (pin == C90770_POWER_ENABLE_GPIO && sim.gps_power_initialized)) ? 5u : 31u;
+}
+uint gpio_get_dir(uint pin) {
+    return pin == C90770_POWER_ENABLE_GPIO && sim.gps_power_enabled ? GPIO_OUT : 0u;
+}
+bool gpio_is_pulled_up(uint pin) { return pin == C90770_UART_RX_GPIO; }
+bool gpio_is_pulled_down(uint pin) { (void)pin; return false; }
+void gpio_init(uint pin) {
+    if (pin == C90770_RESET_GPIO) sim.gps_reset_initialized = true;
+    if (pin == C90770_POWER_ENABLE_GPIO) sim.gps_power_initialized = true;
+}
+void gpio_disable_pulls(uint pin) {
+    if (pin == C90770_RESET_GPIO) {
+        assert(sim.gps_reset_initialized);
+        sim.gps_reset_released = true;
+    } else {
+        assert(pin == C90770_POWER_ENABLE_GPIO && sim.gps_power_initialized);
+    }
+}
+void gpio_put(uint pin, bool value) {
+    if (pin == C90770_POWER_ENABLE_GPIO) {
+        assert(sim.gps_power_initialized && !value);
+        sim.gps_power_low_preloaded = true;
+    }
+}
+void gpio_set_dir(uint pin, bool output) {
+    if (pin == C90770_POWER_ENABLE_GPIO) {
+        assert(output && sim.gps_reset_released && sim.gps_power_low_preloaded);
+        sim.gps_power_enabled = true;
+        sim.gps_power_enabled_at = now;
+    }
+}
 void gpio_set_function(uint pin, uint function) { (void)pin; (void)function; }
 void gpio_pull_up(uint pin) { (void)pin; }
 uint i2c_init(i2c_inst_t *i, uint baud) { assert(i == i2c0 && baud == 400000); return baud; }
-uint uart_init(uart_inst_t *u, uint baud) { assert(u == uart1 && baud == 9600); return baud; }
+uint uart_init(uart_inst_t *u, uint baud) {
+    assert(u == uart1 && baud == 9600 && sim.gps_reset_released);
+    assert(sim.gps_power_enabled && now - sim.gps_power_enabled_at >= 10000);
+    return baud;
+}
 void uart_set_format(uart_inst_t *u, uint bits, uint stops, uint parity) {
     assert(u == uart1 && bits == 8 && stops == 1 && parity == UART_PARITY_NONE);
 }
@@ -162,6 +202,12 @@ bool uart_is_readable_within_us(uart_inst_t *u, uint32_t us) {
 char uart_getc(uart_inst_t *u) {
     assert(uart_is_readable(u));
     return sim.uart[sim.uart_read++].byte;
+}
+uart_hw_t *uart_get_hw(uart_inst_t *u) {
+    static uart_hw_t hw;
+    hw.dr = (uint8_t)uart_getc(u);
+    if (!strcmp(sim.name, "diag_uart_errors")) hw.dr |= 0xf00u;
+    return &hw;
 }
 int getchar_timeout_us(uint32_t us) {
     assert(core == 0 && us == 0);
@@ -263,6 +309,11 @@ static void configure(const char *name) {
     sim.gps = true;
     sim.usb = true;
     if (!strcmp(name, "no_inputs")) { sim.gps = sim.usb = false; sim.duration = 130 * SECOND; }
+    else if (!strcmp(name, "diag_no_data") || !strcmp(name, "diag_uart_errors")) {
+        sim.gps = false; sim.duration = 8 * SECOND;
+        if (!strcmp(name, "diag_uart_errors")) uart_text(SECOND, "\xff\x55\x7f");
+        serial_byte(6 * SECOND, 'd');
+    }
     else if (!strcmp(name, "usb_waiting")) { sim.gps = false; sim.duration = 130 * SECOND; }
     else if (!strcmp(name, "gps_no_usb")) sim.usb = false;
     else if (!strcmp(name, "gps_usb")) { }
@@ -284,6 +335,7 @@ static void configure(const char *name) {
     else if (!strcmp(name, "no_altitude")) sim.no_altitude = true;
     else if (!strcmp(name, "gps_priority")) {
         sim.duration = 725 * SECOND;
+        serial_byte(20 * SECOND, 'd'); /* Diagnostics during the first RF frame. */
         serial_byte(10 * SECOND, 'g'); serial_byte(125 * SECOND, 'g');
         serial_byte(245 * SECOND, 'g'); serial_byte(370 * SECOND, 'g');
     } else if (!strcmp(name, "gps_late_reacquire")) {

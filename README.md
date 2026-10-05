@@ -14,7 +14,7 @@ read serial with something like:
 ```screen /dev/tty.usbmodem11301 115200```
 
 At boot, RF stays off while the C90770 GPS is monitored on UART1 RX GPIO 9 at
-9600 baud and USB serial listens for lowercase `g`. Other characters are ignored.
+9600 baud and USB serial listens for lowercase `g` and `d`. Other characters are ignored.
 The camera and sweep examples below the beacon call in `bloon.c` are not run.
 
 - A `g` from `wspr_serial_trigger.py` starts a standard frame immediately,
@@ -50,6 +50,12 @@ unchanged; telemetry decoding must interpret the raw locator bits according to
 the callsign, rather than treating fine/altitude frames as geographic locators.
 
 GPS parsing runs on core 1; core 0 handles serial triggers and symbol deadlines.
+At GPS initialization, GP6 (`C90770_RESET_GPIO`) is released as an input without
+pulls. The GPS reset is active-low; leaving the Pico's default pull-down enabled
+can hold it in reset. This follows the module manual's option to leave nRESET
+floating. GP2 (`C90770_POWER_ENABLE_GPIO`, `GPS_LSWITCH`) is then driven low
+to turn on the AO3401A load switch, supplying GPS VCC and EN. UART reception
+starts after a 10 ms supply-settling delay. GP3 backup-supply control is unchanged.
 UTC is anchored to the start of an RMC sentence and includes fractional seconds.
 This avoids adding the sentence's full wire time, but it is still NMEA timing:
 receiver reporting latency and Pico clock drift remain. There is no PPS input,
@@ -60,6 +66,7 @@ slot synchronization, and RF start/completion/errors. Satellite counts and
 checksum errors are summarized only when changed, at most once per ten seconds.
 Opening/reconnecting the USB terminal prints a current-state snapshot, even if
 boot messages were missed. There is no repeated heartbeat for unchanged state.
+
 `PICO_STDIO_USB_STDOUT_TIMEOUT_US=0`
 makes USB output best-effort: a full USB buffer drops remaining log output
 instead of waiting for the host. A slow reader can therefore lose or truncate

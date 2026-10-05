@@ -28,6 +28,14 @@
 #define C90770_UART_BAUD 9600u
 #endif
 
+#ifndef C90770_RESET_GPIO
+#define C90770_RESET_GPIO 6u
+#endif
+
+#ifndef C90770_POWER_ENABLE_GPIO
+#define C90770_POWER_ENABLE_GPIO 2u
+#endif
+
 typedef struct {
     uart_inst_t *uart;
     uint rx_gpio;
@@ -52,6 +60,19 @@ static inline void c90770_uart_init(
 }
 
 static inline void c90770_uart_init_default(c90770_uart_t *uart) {
+    /* Board GP6 connects to active-low nRESET. The module manual permits
+     * floating reset; remove the Pico's reset-default pull-down without
+     * driving a high level into a module whose supply may still be off. */
+    gpio_init(C90770_RESET_GPIO);
+    gpio_disable_pulls(C90770_RESET_GPIO);
+
+    /* GPS_LSWITCH drives the AO3401A P-channel gate through 500 ohms.
+     * Low enables GPS_VDD (VCC and EN); preload low before enabling output. */
+    gpio_init(C90770_POWER_ENABLE_GPIO);
+    gpio_disable_pulls(C90770_POWER_ENABLE_GPIO);
+    gpio_put(C90770_POWER_ENABLE_GPIO, false);
+    gpio_set_dir(C90770_POWER_ENABLE_GPIO, GPIO_OUT);
+    sleep_ms(10u); /* Allow the load-switch RC and GPS supply to settle. */
     c90770_uart_init(uart, C90770_UART_INSTANCE, C90770_UART_RX_GPIO, C90770_UART_BAUD);
 }
 

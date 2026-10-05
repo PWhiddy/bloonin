@@ -5,6 +5,7 @@
 #include "pico/mutex.h"
 #include "pico/stdio_usb.h"
 #include "wspr.h"
+#include "gps_diagnostics.h"
 
 #define WSPR_GPS_FRESH_US 5000000ll
 #define WSPR_GPS_PROGRESS_LOG_US 10000000ll
@@ -76,6 +77,7 @@ static mutex_t wspr_gps_mutex;
 static c90770_gps_monitor_state_t wspr_gps_shared;
 static uint32_t wspr_gps_revision;
 static bool wspr_gps_log_requested;
+static bool wspr_gps_diag_requested;
 
 static void wspr_monitor_gps(void) {
     c90770_uart_t uart;
@@ -86,13 +88,19 @@ static void wspr_monitor_gps(void) {
     wspr_gps_log_state_t log = {0};
     absolute_time_t last_byte = get_absolute_time();
     bool received_any = false;
+    gps_diagnostics_t diag = {0};
+    absolute_time_t next_diag = get_absolute_time();
 
     while (true) {
         if (uart_is_readable(uart.uart)) {
-            char byte = (char)uart_getc(uart.uart);
+            /* Read UARTDR once, preserving error flags discarded by uart_getc. */
+            uint32_t data = uart_get_hw(uart.uart)->dr;
+            char byte = (char)(data & 0xffu);
             last_byte = get_absolute_time();
+            gps_diagnostics_record(&diag, data, last_byte);
             received_any = true;
             if (c90770_nmea_stream_push(&stream, byte, last_byte)) {
+                ++diag.sentences;
                 c90770_parse_gps_line_at(&gps, stream.line, stream.started_at);
                 mutex_enter_blocking(&wspr_gps_mutex);
                 wspr_gps_shared = gps;
@@ -102,7 +110,12 @@ static void wspr_monitor_gps(void) {
         } else {
             sleep_us(100u);
         }
+        bool report_diag = false;
         if (mutex_try_enter(&wspr_gps_mutex, NULL)) {
+            if (wspr_gps_diag_requested && time_reached(next_diag)) {
+                wspr_gps_diag_requested = false;
+                report_diag = true;
+            }
             if (wspr_gps_log_requested) {
                 wspr_gps_log_requested = false;
                 log.initialized = false;
@@ -110,6 +123,10 @@ static void wspr_monitor_gps(void) {
                 log.progress_at = get_absolute_time();
             }
             mutex_exit(&wspr_gps_mutex);
+        }
+        if (report_diag) {
+            gps_diagnostics_report(&diag, gps.checksum_failures, get_absolute_time());
+            next_diag = make_timeout_time_ms(1000u);
         }
         wspr_log_gps_status(&log, &gps, received_any, last_byte, get_absolute_time());
     }
@@ -248,13 +265,14 @@ static inline void wspr_run_beacon(void) {
     }
     printf("WSPR RF STATE: NOT TRANSMITTING; base=%lu Hz callsign=%s power=%u dBm\n",
            (unsigned long)WSPR_BASE_HZ, WSPR_CALLSIGN, (unsigned)WSPR_POWER_DBM);
-    printf("WSPR waiting for serial 'g' or GPS UTC + location + altitude; placeholder grid=%s\n",
+    printf("WSPR waiting for serial 'g' or GPS UTC + location + altitude; placeholder grid=%s; 'd'=GPS diagnostics\n",
            schedule.grid);
 
     static c90770_gps_monitor_state_t gps;
     uint32_t revision = 0u;
     bool refresh_gps = false;
     bool usb_connected = false;
+    bool request_diag = false;
     while (true) {
         bool connected = stdio_usb_connected();
         if (connected && !usb_connected) {
@@ -276,6 +294,12 @@ static inline void wspr_run_beacon(void) {
             int byte = getchar_timeout_us(0u);
             if (byte == PICO_ERROR_TIMEOUT) break;
             if (byte == 'g' && !tx.active) trigger = true;
+            if (byte == 'd') request_diag = true;
+        }
+        if (request_diag && mutex_try_enter(&wspr_gps_mutex, NULL)) {
+            wspr_gps_diag_requested = true;
+            mutex_exit(&wspr_gps_mutex);
+            request_diag = false;
         }
 
         if (tx.active) {

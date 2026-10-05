@@ -10,6 +10,7 @@
 typedef unsigned int uint;
 typedef int64_t absolute_time_t;
 typedef struct { int unused; } uart_inst_t;
+typedef struct { uint32_t dr; } uart_hw_t;
 typedef struct { int unused; } i2c_inst_t;
 typedef pthread_mutex_t mutex_t;
 #define uart1 ((uart_inst_t *)1)
@@ -32,11 +33,18 @@ void sleep_ms(uint32_t ms);
 int getchar_timeout_us(uint32_t us);
 int i2c_write_blocking(i2c_inst_t *i, uint8_t addr, const uint8_t *data, size_t n, bool nostop);
 int i2c_read_blocking(i2c_inst_t *i, uint8_t addr, uint8_t *data, size_t n, bool nostop);
+bool gpio_get(uint pin);
+uint gpio_get_function(uint pin);
+uint gpio_get_dir(uint pin);
+bool gpio_is_pulled_up(uint pin);
+bool gpio_is_pulled_down(uint pin);
+uart_hw_t *uart_get_hw(uart_inst_t *u);
 void gpio_init(uint pin);
 void gpio_put(uint pin, bool value);
 void gpio_set_dir(uint pin, bool output);
 void gpio_set_function(uint pin, uint function);
 void gpio_pull_up(uint pin);
+void gpio_disable_pulls(uint pin);
 uint i2c_init(i2c_inst_t *i, uint baud);
 uint uart_init(uart_inst_t *u, uint baud);
 void uart_set_format(uart_inst_t *u, uint bits, uint stops, uint parity);
