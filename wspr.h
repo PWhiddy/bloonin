@@ -53,7 +53,7 @@
 // "FN30"
 #endif
 #ifndef WSPR_POWER_DBM
-#define WSPR_POWER_DBM 10u
+#define WSPR_POWER_DBM 13u
 #endif
 
 static inline uint8_t wspr_parity32(uint32_t value) {
