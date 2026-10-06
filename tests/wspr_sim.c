@@ -41,6 +41,9 @@ static struct {
     bool time_only, location_only, malformed, fractional, midnight;
     bool noisy, moving, silence, reacquire, no_altitude;
     bool gps_reset_initialized, gps_reset_released;
+    bool adc_initialized, temp_enabled;
+    uint adc_channel;
+    unsigned adc_reads;
     bool gps_power_initialized, gps_power_low_preloaded, gps_power_enabled;
     int64_t gps_power_enabled_at;
     int64_t fix_at, loss_at, recover_at, move_at;
@@ -145,6 +148,20 @@ uint gpio_get_dir(uint pin) {
 }
 bool gpio_is_pulled_up(uint pin) { return pin == C90770_UART_RX_GPIO; }
 bool gpio_is_pulled_down(uint pin) { (void)pin; return false; }
+void adc_init(void) { assert(core == 0); sim.adc_initialized = true; }
+void adc_set_temp_sensor_enabled(bool enabled) { assert(core == 0); sim.temp_enabled = enabled; }
+void adc_select_input(uint input) { assert(core == 0); sim.adc_channel = input; }
+uint16_t adc_read(void) {
+    assert(core == 0 && sim.adc_initialized && sim.temp_enabled);
+    assert(sim.adc_channel == ADC_TEMPERATURE_CHANNEL_NUM && !sim.rf);
+    ++sim.adc_reads;
+    sleep_us(2u);
+    if (!strcmp(sim.name, "temp_cold")) return 1200u;
+    if (!strcmp(sim.name, "temp_hot")) return 700u;
+    /* Temperature changes during frame one; frame four must retain 27 C.
+     * The next sequence samples this colder reading (rounds to -31 C). */
+    return now < 30 * SECOND ? 876u : 1000u;
+}
 void gpio_init(uint pin) {
     if (pin == C90770_RESET_GPIO) sim.gps_reset_initialized = true;
     if (pin == C90770_POWER_ENABLE_GPIO) sim.gps_power_initialized = true;
@@ -331,16 +348,17 @@ static void configure(const char *name) {
     else if (!strcmp(name, "gps_silent")) { sim.loss_at = 20 * SECOND; sim.silence = true; }
     else if (!strcmp(name, "gps_reacquire")) {
         sim.loss_at = 20 * SECOND; sim.recover_at = 125 * SECOND; sim.move_at = 125 * SECOND;
-    } else if (!strcmp(name, "moving")) { sim.move_at = 30 * SECOND; sim.duration = 725 * SECOND; }
+    } else if (!strcmp(name, "moving")) { sim.move_at = 30 * SECOND; sim.duration = 965 * SECOND; }
+    else if (!strcmp(name, "temp_cold") || !strcmp(name, "temp_hot")) sim.duration = 485 * SECOND;
     else if (!strcmp(name, "no_altitude")) sim.no_altitude = true;
     else if (!strcmp(name, "gps_priority")) {
-        sim.duration = 725 * SECOND;
+        sim.duration = 965 * SECOND;
         serial_byte(20 * SECOND, 'd'); /* Diagnostics during the first RF frame. */
         serial_byte(10 * SECOND, 'g'); serial_byte(125 * SECOND, 'g');
         serial_byte(245 * SECOND, 'g'); serial_byte(370 * SECOND, 'g');
     } else if (!strcmp(name, "gps_late_reacquire")) {
-        sim.loss_at = 20 * SECOND; sim.recover_at = 400 * SECOND;
-        sim.move_at = 400 * SECOND; sim.duration = 845 * SECOND;
+        sim.loss_at = 20 * SECOND; sim.recover_at = 600 * SECOND;
+        sim.move_at = 600 * SECOND; sim.duration = 1085 * SECOND;
     }
     else if (!strcmp(name, "midnight")) sim.utc_origin = 86390;
     else if (!strcmp(name, "fractional")) sim.fractional = true;
@@ -419,12 +437,12 @@ static void report(void) {
            "\"dropped_logs\":%u,\"gps_revision\":%u,\"checksum_failures\":%u,"
            "\"outputs_ever_enabled\":%u,\"unused_outputs_ever_powered\":%u,"
            "\"output_disable_mask\":%u,\"callsign\":\"%s\",\"fallback_grid\":\"%s\","
-           "\"callsign_fine\":\"%s\",\"callsign_alt\":\"%s\",\"power_dbm\":%u,\"frames\":[",
+           "\"callsign_fine\":\"%s\",\"callsign_alt\":\"%s\",\"callsign_temp\":\"%s\",\"adc_reads\":%u,\"power_dbm\":%u,\"frames\":[",
            sim.name, (long long)sim.duration, sim.uart_size, sim.uart_read, sim.uart_overruns,
            sim.serial_read, sim.fault_count, sim.rf ? "true" : "false", sim.dropped,
            wspr_gps_revision, wspr_gps_shared.checksum_failures,
            sim.outputs_ever_enabled, sim.unused_outputs_ever_powered, sim.registers[3],
-           WSPR_CALLSIGN, WSPR_FALLBACK_GRID, WSPR_CALLSIGN_FINE, WSPR_CALLSIGN_ALT, (unsigned)WSPR_POWER_DBM);
+           WSPR_CALLSIGN, WSPR_FALLBACK_GRID, WSPR_CALLSIGN_FINE, WSPR_CALLSIGN_ALT, WSPR_CALLSIGN_TEMP, sim.adc_reads, (unsigned)WSPR_POWER_DBM);
     for (unsigned i = 0; i < sim.frame_count; ++i) {
         frame_t *frame = &sim.frames[i];
         printf("%s{\"start_us\":%lld,\"end_us\":%lld,\"tones\":[", i ? "," : "",

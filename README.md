@@ -23,12 +23,14 @@ The camera and sweep examples below the beacon call in `bloon.c` are not run.
 - A valid GPS UTC reading and complete location/altitude fix schedule
   the next start at `hh:mm:01` on an even UTC minute, matching the Python script.
   GPS acquisition alone does not transmit in the middle of a slot.
-- GPS operation cycles through standard grid, fine grid, and altitude frames,
-  one every 120 seconds. At the standard frame's start, coordinates and altitude
-  are frozen from the latest complete GGA fix for all three messages. GPS
+- GPS operation cycles through standard grid, fine grid, altitude, and
+  extra-fine location/temperature frames, one every 120 seconds (eight minutes
+  per sequence). At the standard frame's start, coordinates and altitude
+  are frozen from the latest complete GGA fix, and the Pico's internal
+  temperature sensor is sampled, for all four messages. GPS
   remains monitored during transmission. Once GPS takes over, serial triggers
   are ignored, including during subsequent GPS outages.
-- If GPS is lost, the current three-message sequence finishes using its frozen
+- If GPS is lost, the current four-message sequence finishes using its frozen
   fix and the Pico clock. Subsequent slots are skipped until fresh GPS returns;
   the next sequence starts with a standard frame on an even-minute slot. A new
   sequence requires both UTC and a complete fix less than five seconds old.
@@ -41,13 +43,14 @@ The callsign identifies the payload stored in the 15-bit locator field:
 | `WSPR_CALLSIGN` | Standard four-character Maidenhead grid |
 | `WSPR_CALLSIGN_FINE` | `longitude_index * 180 + latitude_index` (0–32399) |
 | `WSPR_CALLSIGN_ALT` | GGA altitude in meters, rounded to nearest meter and clamped to 0–32767 |
+| `WSPR_CALLSIGN_TEMP` (`ZL3XYT`) | `((extra_longitude_index * 15 + extra_latitude_index) << 7) \| temperature_code` (0–28799) |
 
 Fine indices run from 0 to 179 eastward and northward from the southwest corner
 of the **frozen coarse cell**, dividing its 2° longitude by 1° latitude extent
 into 180 × 180 bins. Decode with `longitude_index = payload / 180` (integer
 division) and `latitude_index = payload % 180`. Power and channel coding stay
 unchanged; telemetry decoding must interpret the raw locator bits according to
-the callsign, rather than treating fine/altitude frames as geographic locators.
+the callsign, rather than treating telemetry frames as geographic locators.
 
 GPS parsing runs on core 1; core 0 handles serial triggers and symbol deadlines.
 At GPS initialization, GP6 (`C90770_RESET_GPIO`) is released as an input without
@@ -83,4 +86,5 @@ cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
   -Itests/stubs -I. tests/wspr_test.c -o /private/tmp/bloonin-wspr-tests
 /private/tmp/bloonin-wspr-tests
 python3 tests/run_simulation.py
+python3 -m unittest discover -s tests -p 'test_wspr_decode.py'
 ```

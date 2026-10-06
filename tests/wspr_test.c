@@ -201,6 +201,36 @@ static void test_transition_logs(void) {
     assert(log_lines == 6);
 }
 
+static void test_extended_payloads(void) {
+    char grid[5];
+    uint16_t payloads[WSPR_SEQUENCE_LENGTH];
+    /* Every subcell, in both hemispheres and at different fine-cell offsets. */
+    const double origins[][2] = {{48, 10}, {-90, -180}, {-35, -72}};
+    for (unsigned cell = 0; cell < 3; ++cell) {
+        for (unsigned x = 0; x < 15; ++x) {
+            for (unsigned y = 0; y < 15; ++y) {
+                double lat = origins[cell][0] + (21 + (y + 0.5) / 15) / 180;
+                double lon = origins[cell][1] + (136 + (x + 0.5) / 15) / 90;
+                assert(wspr_extended_payloads(lat, lon, 123.5, -12, grid, payloads));
+                assert(payloads[1] == 136 * 180 + 21 && payloads[2] == 124);
+                assert(payloads[3] == (x * 15 + y) * 128 + 68);
+                assert(payloads[3] < 32400);
+            }
+        }
+    }
+    const double temperatures[] = {-1000, -80, -79.51, -79.5, -0.5, 0.5, 46.49, 46.5, 47, 1000};
+    const unsigned codes[] = {0, 0, 0, 1, 80, 81, 126, 127, 127, 127};
+    for (unsigned i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
+        assert(wspr_extended_payloads(48, 10, 0, temperatures[i], grid, payloads));
+        assert(payloads[1] == 0 && payloads[3] == codes[i]);
+    }
+    assert(wspr_extended_payloads(89.999999, 179.999999, 32767, 100, grid, payloads));
+    assert(strcmp(grid, "RR99") == 0 && payloads[1] == 32399 && payloads[3] == 28799);
+    assert(!wspr_extended_payloads(48, 10, 0, NAN, grid, payloads));
+    assert(!wspr_extended_payloads(48, 10, 0, INFINITY, grid, payloads));
+    assert(!wspr_extended_payloads(90, 10, 0, 27, grid, payloads));
+}
+
 static void test_telemetry(void) {
     char grid[5];
     uint16_t coarse, fine, alt;
@@ -240,6 +270,7 @@ static void test_telemetry(void) {
     const char *call;
     uint16_t payload;
     assert(wspr_beacon_message(&schedule, &gps, 1000000, &call, &payload));
+    assert(test_adc_channel == ADC_TEMPERATURE_CHANNEL_NUM && test_adc_reads == 17);
     assert(strcmp(call, WSPR_CALLSIGN) == 0 && strcmp(schedule.snapshot_grid, "JN58") == 0);
     wspr_beacon_did_start(&schedule, 1000000);
     gps.have_coordinates = false;
@@ -250,18 +281,26 @@ static void test_telemetry(void) {
     assert(wspr_beacon_message(&schedule, &gps, 241000000, &call, &payload));
     assert(strcmp(call, WSPR_CALLSIGN_ALT) == 0 && payload == 124);
     wspr_beacon_did_start(&schedule, 241000000);
-    assert(!wspr_beacon_message(&schedule, &gps, 361000000, &call, &payload));
-    assert(schedule.phase == 0 && schedule.next_start == 481000000);
-    assert(!wspr_beacon_should_start(&schedule, false, true, 362000000));
-    parse(&gps, "GPRMC,120600,A,4900.000,N,01200.000,E,0,0,050926,,,A", 362000000);
-    assert(!wspr_gps_fix_fresh(&gps, 362000000)); // Fresh RMC, stale GGA.
-    parse(&gps, "GPGGA,120600,4900.000,N,01200.000,E,1,08,1,456,M,0,M,,", 362000000);
-    assert(wspr_beacon_use_gps(&schedule, &gps, 362000000));
-    assert(wspr_beacon_message(&schedule, &gps, 363000000, &call, &payload));
+    unsigned reads = test_adc_reads;
+    test_adc_sample = 1000u; // Change the sensor after the original snapshot.
+    assert(wspr_beacon_message(&schedule, &gps, 361000000, &call, &payload));
+    assert(strcmp(call, WSPR_CALLSIGN_TEMP) == 0 && payload == 107u);
+    assert(test_adc_reads == reads); // Fourth frame must not resample temperature.
+    wspr_beacon_did_start(&schedule, 361000000);
+    assert(!wspr_beacon_message(&schedule, &gps, 481000000, &call, &payload));
+    assert(test_adc_reads == reads); // Nor may a skipped new sequence sample it.
+    assert(schedule.phase == 0 && schedule.next_start == 601000000);
+    assert(!wspr_beacon_should_start(&schedule, false, true, 482000000));
+    parse(&gps, "GPRMC,120600,A,4900.000,N,01200.000,E,0,0,050926,,,A", 482000000);
+    assert(!wspr_gps_fix_fresh(&gps, 482000000)); // Fresh RMC, stale GGA.
+    parse(&gps, "GPGGA,120600,4900.000,N,01200.000,E,1,08,1,456,M,0,M,,", 482000000);
+    assert(wspr_beacon_use_gps(&schedule, &gps, 482000000));
+    assert(wspr_beacon_message(&schedule, &gps, 483000000, &call, &payload));
     assert(strcmp(schedule.snapshot_grid, "JN69") == 0 && schedule.payloads[2] == 456);
-    parse(&gps, "GPGGA,120600,4900.000,N,01200.000,E,1,08,1,nan,M,0,M,,", 362000000);
+    assert(test_adc_reads == reads + 17u && schedule.payloads[3] == 49u);
+    parse(&gps, "GPGGA,120600,4900.000,N,01200.000,E,1,08,1,nan,M,0,M,,", 482000000);
     assert(!gps.have_complete_fix && !gps.have_altitude);
-    parse(&gps, "GPGGA,120600,4900.000,N,01200.000,E,1,08,1,bad,M,0,M,,", 362000000);
+    parse(&gps, "GPGGA,120600,4900.000,N,01200.000,E,1,08,1,bad,M,0,M,,", 482000000);
     assert(!gps.have_complete_fix);
 }
 
@@ -283,7 +322,10 @@ static void test_gps_diagnostics(void) {
 }
 
 int main(void) {
+    wspr_temperature_init();
+    assert(test_adc_initialized && test_temp_enabled);
     test_gps_diagnostics();
+    test_extended_payloads();
     test_telemetry();
     test_stream();
     test_gps_and_schedule();

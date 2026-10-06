@@ -40,8 +40,14 @@
 
 #ifndef WSPR_CALLSIGN_ALT
 #define WSPR_CALLSIGN_ALT "ZL3XYA"
-
 #endif
+
+#ifndef WSPR_CALLSIGN_TEMP
+#define WSPR_CALLSIGN_TEMP "ZL3XYT"
+#endif
+
+#define WSPR_SEQUENCE_LENGTH 4u
+#define WSPR_EXTRA_FINE_SIDE 15u
 #ifndef WSPR_FALLBACK_GRID
 #define WSPR_FALLBACK_GRID "AA00"
 // "FN30"
@@ -251,6 +257,33 @@ static inline bool wspr_location_payloads(
     *alt = altitude <= 0.0 ? 0u : altitude >= 32767.0 ? 32767u :
         (uint16_t)(altitude + 0.5);
     return wspr_grid_payload(grid, coarse);
+}
+
+/* Fourth locator: high eight bits = 15*x+y (0..224), low seven bits =
+ * temperature+80 (0..127). All payloads are valid WSPR locators (0..28799).
+ * Temperature rounds to nearest degree, with half degrees toward warmer. */
+static inline bool wspr_extended_payloads(
+    double latitude, double longitude, double altitude, double temperature,
+    char grid[5], uint16_t payloads[WSPR_SEQUENCE_LENGTH]
+) {
+    if (!isfinite(temperature) ||
+        !wspr_location_payloads(latitude, longitude, altitude, grid,
+            &payloads[0], &payloads[1], &payloads[2])) return false;
+
+    double west = -180.0 + 20.0 * (grid[0] - 'A') + 2.0 * (grid[2] - '0');
+    double south = -90.0 + 10.0 * (grid[1] - 'A') + (grid[3] - '0');
+    /* Subtract the frozen fine-cell index to get the fractional offset within
+     * that cell, then subdivide it. Clamp floating-point edge roundoff. */
+    double x_offset = ((longitude - west) * 90.0 - payloads[1] / 180u) * WSPR_EXTRA_FINE_SIDE;
+    double y_offset = ((latitude - south) * 180.0 - payloads[1] % 180u) * WSPR_EXTRA_FINE_SIDE;
+    unsigned x = x_offset <= 0.0 ? 0u : x_offset >= WSPR_EXTRA_FINE_SIDE ?
+        WSPR_EXTRA_FINE_SIDE - 1u : (unsigned)x_offset;
+    unsigned y = y_offset <= 0.0 ? 0u : y_offset >= WSPR_EXTRA_FINE_SIDE ?
+        WSPR_EXTRA_FINE_SIDE - 1u : (unsigned)y_offset;
+    uint16_t temp = temperature <= -80.0 ? 0u : temperature >= 47.0 ? 127u :
+        (uint16_t)(temperature + 80.0 + 0.5);
+    payloads[3] = (uint16_t)(((x * WSPR_EXTRA_FINE_SIDE + y) << 7) | temp);
+    return true;
 }
 
 typedef struct {

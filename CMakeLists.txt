@@ -24,6 +24,7 @@ target_link_libraries(bloon
     pico_stdlib
     pico_multicore
     hardware_i2c
+    hardware_adc
     hardware_pwm
     hardware_pio
     hardware_dma

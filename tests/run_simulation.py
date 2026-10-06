@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = [
-    "diag_no_data", "diag_uart_errors",
+    "diag_no_data", "diag_uart_errors", "temp_cold", "temp_hot",
     "no_altitude", "gps_priority", "gps_late_reacquire", "no_inputs", "usb_waiting", "gps_no_usb", "gps_usb", "serial_only",
     "simultaneous", "gps_during_serial_frame", "gps_loss", "gps_silent",
     "gps_reacquire", "moving", "midnight", "fractional", "near_slot_before",
@@ -123,17 +123,17 @@ def check_report(report):
     elif name == "gps_during_serial_frame":
         expected_starts, expected_grids = [1, 131], [report["fallback_grid"], "JN58"]
     elif name in {"moving", "gps_priority"}:
-        expected_starts = list(range(11, 612, 120))
-        expected_grids = ["JN58"] * 3 + (["FN41"] * 3 if name == "moving" else ["JN58"] * 3)
+        expected_starts = list(range(11, 852, 120))
+        expected_grids = ["JN58"] * 4 + (["FN41"] * 4 if name == "moving" else ["JN58"] * 4)
     elif name == "gps_late_reacquire":
-        expected_starts = [11, 131, 251, 491, 611, 731]
-        expected_grids = ["JN58"] * 3 + ["FN41"] * 3
+        expected_starts = [11, 131, 251, 371, 611, 731, 851, 971]
+        expected_grids = ["JN58"] * 4 + ["FN41"] * 4
     elif name in {"near_slot_after", "altitude_after_slot"}:
         expected_starts, expected_grids = [131], ["JN58"]
     elif name in {"i2c_symbol_failure", "i2c_disable_failure"}:
         expected_starts, expected_grids = [11], ["JN58"]
-    elif name in {"long_holdover", "gps_loss", "gps_silent"}:
-        expected_starts = [11, 131, 251]
+    elif name in {"long_holdover", "gps_loss", "gps_silent", "temp_cold", "temp_hot"}:
+        expected_starts = [11, 131, 251, 371]
         expected_grids = ["JN58"] * len(expected_starts)
     assert len(frames) == len(expected_starts), f"expected {len(expected_starts)} frames, got {len(frames)}"
     assert report["outputs_ever_enabled"] == (1 if frames else 0)
@@ -148,8 +148,8 @@ def check_report(report):
             continue
         decoded.append(decode_frame(frame["tones"]))
         gps_index = frame_index - (1 if name == "gps_during_serial_frame" else 0)
-        phase = gps_index % 3 if name != "serial_only" and gps_index >= 0 else 0
-        call = report[["callsign", "callsign_fine", "callsign_alt"][phase]].upper()
+        phase = gps_index % 4 if name != "serial_only" and gps_index >= 0 else 0
+        call = report[["callsign", "callsign_fine", "callsign_alt", "callsign_temp"][phase]].upper()
         assert decoded[-1]["callsign"] == call, decoded[-1]
         assert decoded[-1]["power_dbm"] == report["power_dbm"]
         if phase == 0:
@@ -157,8 +157,14 @@ def check_report(report):
         elif phase == 1:
             # Munich: 11°31' E, 48°7.038' N => offsets (136, 21).
             assert decoded[-1]["payload"] == (0 if grid == "FN41" else 136 * 180 + 21), decoded[-1]
-        else:
+        elif phase == 2:
             assert decoded[-1]["payload"] == (457 if grid == "FN41" else 123), decoded[-1]
+        else:
+            # Munich fractional fine-cell offsets => extra indices (7, 1).
+            extra_index = 0 if grid == "FN41" else 7 * 15 + 1
+            temperature = -80 if name == "temp_cold" else 47 if name == "temp_hot" else 27 if gps_index < 4 else -31
+            assert decoded[-1]["payload"] == extra_index * 128 + temperature + 80, decoded[-1]
+            assert decoded[-1]["payload"] < 32400
         for index, (at, _) in enumerate(frame["tones"]):
             error = abs(at - frame["start_us"] - index * 8192000000 // 12000)
             max_boundary_error = max(max_boundary_error, error)
@@ -167,6 +173,13 @@ def check_report(report):
             assert frame["end_us"] == 0 and report["rf_enabled"]
         else:
             assert abs(frame["end_us"] - frame["start_us"] - 110_592_000) <= 600
+    # One discarded ADC read plus 16 averaged samples per new GPS snapshot.
+    if not name.startswith("i2c_"):
+        snapshots = 0 if name == "serial_only" else sum(
+            (i - (1 if name == "gps_during_serial_frame" else 0)) >= 0 and
+            (i - (1 if name == "gps_during_serial_frame" else 0)) % 4 == 0
+            for i in range(len(frames)))
+        assert report["adc_reads"] == snapshots * 17, report["adc_reads"]
     if name != "i2c_disable_failure":
         assert not report["rf_enabled"], "RF left enabled"
         assert report["output_disable_mask"] == 0xFF, "idle state did not disable all outputs"

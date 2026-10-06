@@ -19,6 +19,7 @@ typedef pthread_mutex_t mutex_t;
 #define GPIO_FUNC_I2C 3
 #define GPIO_OUT 1
 #define UART_PARITY_NONE 0
+#define ADC_TEMPERATURE_CHANNEL_NUM 4u
 #define PICO_ERROR_TIMEOUT (-1)
 
 absolute_time_t get_absolute_time(void);
@@ -45,6 +46,10 @@ void gpio_set_dir(uint pin, bool output);
 void gpio_set_function(uint pin, uint function);
 void gpio_pull_up(uint pin);
 void gpio_disable_pulls(uint pin);
+void adc_init(void);
+void adc_set_temp_sensor_enabled(bool enabled);
+void adc_select_input(uint input);
+uint16_t adc_read(void);
 uint i2c_init(i2c_inst_t *i, uint baud);
 uint uart_init(uart_inst_t *u, uint baud);
 void uart_set_format(uart_inst_t *u, uint bits, uint stops, uint parity);

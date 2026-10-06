@@ -5,6 +5,7 @@
 #include "pico/mutex.h"
 #include "pico/stdio_usb.h"
 #include "wspr.h"
+#include "wspr_temperature.h"
 #include "gps_diagnostics.h"
 
 #define WSPR_GPS_FRESH_US 5000000ll
@@ -136,8 +137,8 @@ typedef struct {
     bool armed;
     bool gps_slot_selected;
     bool gps_mode;
-    unsigned phase; /* Next GPS message: coarse, fine, altitude. */
-    uint16_t payloads[3];
+    unsigned phase; /* Next GPS message: coarse, fine, altitude, extra-fine/temperature. */
+    uint16_t payloads[WSPR_SEQUENCE_LENGTH];
     char snapshot_grid[5];
     absolute_time_t next_start;
     char grid[5];
@@ -188,7 +189,7 @@ static inline bool wspr_beacon_should_start(
 static inline void wspr_beacon_did_start(
     wspr_beacon_schedule_t *schedule, absolute_time_t start
 ) {
-    if (schedule->gps_mode) schedule->phase = (schedule->phase + 1u) % 3u;
+    if (schedule->gps_mode) schedule->phase = (schedule->phase + 1u) % WSPR_SEQUENCE_LENGTH;
     schedule->armed = true;
     schedule->next_start = delayed_by_us(start, WSPR_SLOT_PERIOD_US);
     /* Select the next slot from the newest fix after this frame completes. */
@@ -202,7 +203,7 @@ static inline bool wspr_beacon_message(
     absolute_time_t now, const char **callsign, uint16_t *payload
 ) {
     static const char *const callsigns[] = {
-        WSPR_CALLSIGN, WSPR_CALLSIGN_FINE, WSPR_CALLSIGN_ALT
+        WSPR_CALLSIGN, WSPR_CALLSIGN_FINE, WSPR_CALLSIGN_ALT, WSPR_CALLSIGN_TEMP
     };
     if (!schedule->gps_mode) {
         *callsign = WSPR_CALLSIGN;
@@ -210,9 +211,9 @@ static inline bool wspr_beacon_message(
     }
     if (schedule->phase == 0u &&
         (!wspr_gps_fix_fresh(gps, now) ||
-         !wspr_location_payloads(gps->fix_latitude, gps->fix_longitude,
-             gps->fix_altitude, schedule->snapshot_grid, &schedule->payloads[0],
-             &schedule->payloads[1], &schedule->payloads[2]))) {
+         !wspr_extended_payloads(gps->fix_latitude, gps->fix_longitude,
+             gps->fix_altitude, wspr_read_temperature(), schedule->snapshot_grid,
+             schedule->payloads))) {
         schedule->next_start = delayed_by_us(schedule->next_start, WSPR_SLOT_PERIOD_US);
         schedule->gps_slot_selected = false;
         return false;
@@ -248,6 +249,7 @@ static inline void wspr_stop_on_error(si5351a_i2c_t *clock, const char *reason) 
 static inline void wspr_run_beacon(void) {
     mutex_init(&wspr_gps_mutex);
     multicore_launch_core1(wspr_monitor_gps);
+    wspr_temperature_init();
 
     si5351a_i2c_t clock;
     if (!si5351a_i2c_prepare_output_hz(&clock, WSPR_BASE_HZ) ||

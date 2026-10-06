@@ -23,6 +23,7 @@ typedef struct { int unused; } mutex_t;
 #define GPIO_FUNC_I2C 3
 #define GPIO_OUT 1
 #define UART_PARITY_NONE 0
+#define ADC_TEMPERATURE_CHANNEL_NUM 4u
 #define PICO_ERROR_TIMEOUT (-1)
 
 static absolute_time_t test_now;
@@ -32,6 +33,18 @@ static bool test_fail_write;
 static bool test_rf_enabled_during_init;
 static uint8_t test_outputs_ever_enabled;
 static bool test_unused_output_powered_up;
+static uint16_t test_adc_sample = 876u; // Approximately 27 C with nominal VREF.
+static unsigned test_adc_reads;
+static bool test_adc_initialized, test_temp_enabled;
+static uint test_adc_channel;
+
+static inline void adc_init(void) { test_adc_initialized = true; }
+static inline void adc_set_temp_sensor_enabled(bool enabled) { test_temp_enabled = enabled; }
+static inline void adc_select_input(uint input) { test_adc_channel = input; }
+static inline uint16_t adc_read(void) {
+    ++test_adc_reads;
+    return test_adc_sample;
+}
 
 static inline absolute_time_t get_absolute_time(void) { return test_now; }
 static inline absolute_time_t delayed_by_us(absolute_time_t t, int64_t us) { return t + us; }
