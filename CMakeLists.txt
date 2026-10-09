@@ -23,6 +23,7 @@ add_executable(bloon
 target_link_libraries(bloon
     pico_stdlib
     pico_multicore
+    hardware_clocks
     hardware_i2c
     hardware_adc
     hardware_pwm

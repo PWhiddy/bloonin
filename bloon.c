@@ -5,6 +5,7 @@
  */
 
 #include "pico/stdlib.h"
+#include "hardware/clocks.h"
 #include "c90770_uart.h"
 #include "si5351a_i2c.h"
 #include "wspr_beacon.h"
@@ -46,6 +47,8 @@ void pico_set_led(bool led_on) {
 }
 
 int main() {
+    /* 54mhz clock for less power usage (>10% more than 48mhz usb clock min) */
+    set_sys_clock_khz(54000u, true);
     stdio_init_all();
     /* This loop does not return.  Keeping it first protects WSPR symbol timing
      * from the scan, sweep, GPS monitor, camera demo, and LED code below. */
