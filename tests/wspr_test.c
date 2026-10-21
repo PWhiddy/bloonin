@@ -104,6 +104,21 @@ static void test_gps_and_schedule(void) {
     assert(gps.checksum_failures == 1);
 }
 
+static void assert_differential_outputs(void) {
+    /* Both active drivers share MS0 and drive opposite phases at equal strength.
+     * The independent R dividers must also match; MS1 is never used for tones. */
+    assert((test_registers[16] & 0x80u) == 0);
+    assert((test_registers[17] & 0x80u) == 0);
+    assert((test_registers[16] & 0x0cu) == 0x0cu);
+    assert((test_registers[17] & 0x0cu) == 0x08u);
+    assert(((test_registers[16] ^ test_registers[17]) & 0x10u) != 0);
+    assert((test_registers[16] & 3u) == SI5351A_CLK0_DRIVE);
+    assert((test_registers[17] & 3u) == SI5351A_CLK0_DRIVE);
+    assert((test_registers[187] & 0x10u) != 0);
+    assert((test_registers[44] & 0x70u) == 0);
+    assert((test_registers[52] & 0x70u) == 0);
+}
+
 static void test_transmitter(void) {
     si5351a_i2c_t clock = {0};
     test_now = 0;
@@ -115,13 +130,14 @@ static void test_transmitter(void) {
     assert(!test_rf_enabled_during_init);
     assert(test_outputs_ever_enabled == 0);
     assert(!test_unused_output_powered_up);
+    assert_differential_outputs();
     wspr_transmitter_t tx = {0};
     assert(wspr_prepare(&clock, &tx, "K1ABC", "FN30", 10));
     assert(test_registers[3] == 0xffu);
     assert(test_outputs_ever_enabled == 0);
     assert(WSPR_BASE_HZ == 14097100u);
     assert(wspr_start(&clock, &tx, 1000000));
-    assert(test_registers[3] == 0xfeu);
+    assert(test_registers[3] == 0xfcu);
     unsigned writes = test_writes;
     test_now = 1682665;
     assert(wspr_poll_transmitter(&clock, &tx));
@@ -133,6 +149,8 @@ static void test_transmitter(void) {
         test_now = 1000000 + wspr_symbol_offset_us(symbol);
         assert(wspr_poll_transmitter(&clock, &tx));
         assert(tx.symbol == symbol && tx.active);
+        assert(test_registers[3] == 0xfcu);
+        assert_differential_outputs();
         /* Decode the actual I2C divider to verify the current symbol's tone. */
         uint32_t p3 = ((test_registers[47] & 0xf0u) << 12) | (test_registers[42] << 8) | test_registers[43];
         uint32_t p1 = ((test_registers[44] & 3u) << 16) | (test_registers[45] << 8) | test_registers[46];
@@ -157,12 +175,13 @@ static void test_transmitter(void) {
     assert(!tx.active && test_registers[3] == 0xffu);
     assert(!wspr_prepare(&clock, &tx, "BAD", "FN30", 10));
     assert(test_registers[3] == 0xffu);
-    /* The direct output helper and WSPR share the same CLK0-only policy. */
+    /* The direct output helper and WSPR share the differential output pair. */
     assert(si5351a_i2c_configure_output_hz(&clock, WSPR_BASE_HZ));
-    assert(test_registers[3] == 0xfeu);
-    assert(si5351a_i2c_set_clk0_enabled(&clock, false));
+    assert(test_registers[3] == 0xfcu);
+    assert_differential_outputs();
+    assert(si5351a_i2c_set_outputs_enabled(&clock, false));
     assert(test_registers[3] == 0xffu);
-    assert(test_outputs_ever_enabled == 1u);
+    assert(test_outputs_ever_enabled == 3u);
     assert(!test_unused_output_powered_up);
 }
 

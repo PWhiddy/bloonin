@@ -25,7 +25,7 @@ SCENARIOS = [
     "simultaneous", "gps_during_serial_frame", "gps_loss", "gps_silent",
     "gps_reacquire", "moving", "midnight", "fractional", "near_slot_before",
     "near_slot_after", "altitude_after_slot", "time_only", "location_only", "malformed", "noisy_uart",
-    "usb_reconnect", "usb_backpressure", "i2c_init_failure", "i2c_start_failure",
+    "usb_reconnect", "usb_backpressure", "i2c_init_failure", "i2c_clk1_init_failure", "i2c_start_failure",
     "i2c_symbol_failure", "i2c_disable_failure", "long_holdover",
 ]
 
@@ -87,7 +87,7 @@ def decode_frame(tones):
 def check_report(report):
     name = report["scenario"]
     frames = report["frames"]
-    assert report["outputs_ever_enabled"] & 0xFE == 0, "unused clock output enabled"
+    assert report["outputs_ever_enabled"] & 0xFC == 0, "unused clock output enabled"
     assert report["unused_outputs_ever_powered"] == 0, "unused clock output powered up"
     assert report["uart_overruns"] == 0, "GPS UART overflowed"
     assert report["uart_read"] == report["uart_bytes"], "GPS monitoring stopped early"
@@ -116,7 +116,7 @@ def check_report(report):
     expected_starts = [11, 131]
     expected_grids = ["JN58", "JN58"]
     if name in {"no_inputs", "usb_waiting", "time_only", "location_only", "malformed",
-                "i2c_init_failure", "i2c_start_failure", "no_altitude", "diag_no_data", "diag_uart_errors"}:
+                "i2c_init_failure", "i2c_clk1_init_failure", "i2c_start_failure", "no_altitude", "diag_no_data", "diag_uart_errors"}:
         expected_starts = expected_grids = []
     elif name == "serial_only":
         expected_grids = [report["fallback_grid"]] * 2
@@ -136,7 +136,9 @@ def check_report(report):
         expected_starts = [11, 131, 251, 371]
         expected_grids = ["JN58"] * len(expected_starts)
     assert len(frames) == len(expected_starts), f"expected {len(expected_starts)} frames, got {len(frames)}"
-    assert report["outputs_ever_enabled"] == (1 if frames else 0)
+    assert report["outputs_ever_enabled"] == (3 if frames else 0)
+    if name == "i2c_clk1_init_failure":
+        assert any("failed to configure Si5351A CLK1 control register" in text for text in texts)
     max_boundary_error = 0
     decoded = []
     for frame_index, (frame, start, grid) in enumerate(zip(frames, expected_starts, expected_grids)):
@@ -184,7 +186,7 @@ def check_report(report):
         assert not report["rf_enabled"], "RF left enabled"
         assert report["output_disable_mask"] == 0xFF, "idle state did not disable all outputs"
     else:
-        assert report["output_disable_mask"] == 0xFE
+        assert report["output_disable_mask"] == 0xFC
     if name.startswith("i2c_"):
         assert report["fault_count"] > 0
         assert any("beacon halted" in text for text in texts)

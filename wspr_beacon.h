@@ -226,7 +226,7 @@ static inline bool wspr_beacon_message(
 static inline void wspr_stop_on_error(si5351a_i2c_t *clock, const char *reason) {
     si5351a_error_t error = clock->last_error;
     uint8_t reg = clock->last_reg;
-    bool disabled = si5351a_i2c_set_clk0_enabled(clock, false);
+    bool disabled = si5351a_i2c_set_outputs_enabled(clock, false);
     bool first = true;
     bool was_connected = false;
     while (true) {
@@ -253,7 +253,7 @@ static inline void wspr_run_beacon(void) {
 
     si5351a_i2c_t clock;
     if (!si5351a_i2c_prepare_output_hz(&clock, WSPR_BASE_HZ) ||
-        !si5351a_i2c_set_clk0_enabled(&clock, false)) {
+        !si5351a_i2c_set_outputs_enabled(&clock, false)) {
         wspr_stop_on_error(&clock, "initialization failed");
     }
 

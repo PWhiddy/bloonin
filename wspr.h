@@ -1,9 +1,9 @@
 /* Standard WSPR (type 1) encoder and transmitter for an Si5351A.
  *
- * The transmitter defaults to 20 m on CLK0.  Attach CLK0 to a correctly filtered RF
- * chain; a Si5351A square-wave output is not legal or suitable as an antenna
- * feed by itself.  A calibrated reference (preferably a GPSDO/TCXO) is needed
- * for reliable weak-signal reception.
+ * The transmitter defaults to 20 m with complementary CLK0/CLK1 outputs for
+ * the Traquito antenna pads. Both outputs follow MultiSynth0, with CLK1
+ * inverted. The RF chain needs appropriate harmonic filtering; the board's
+ * 26 MHz TCXO supplies the frequency reference.
  */
 #ifndef WSPR_H
 #define WSPR_H
@@ -309,7 +309,7 @@ static inline bool wspr_prepare_payload(
     const char *callsign, uint16_t payload, uint8_t power_dbm
 ) {
     tx->active = false;
-    if (!si5351a_i2c_set_clk0_enabled(clock, false) ||
+    if (!si5351a_i2c_set_outputs_enabled(clock, false) ||
         !wspr_encode_payload(callsign, payload, power_dbm, tx->symbols)) {
         return false;
     }
@@ -339,7 +339,7 @@ static inline bool wspr_prepare(
 static inline bool wspr_start(
     si5351a_i2c_t *clock, wspr_transmitter_t *tx, absolute_time_t start
 ) {
-    if (!si5351a_i2c_set_clk0_enabled(clock, true)) {
+    if (!si5351a_i2c_set_outputs_enabled(clock, true)) {
         return false;
     }
     tx->start = start;
@@ -360,7 +360,7 @@ static inline bool wspr_poll_transmitter(si5351a_i2c_t *clock, wspr_transmitter_
     }
     if (tx->symbol + 1u == WSPR_SYMBOL_COUNT) {
         tx->active = false;
-        return si5351a_i2c_set_clk0_enabled(clock, false);
+        return si5351a_i2c_set_outputs_enabled(clock, false);
     }
     const wspr_tone_t *previous = &tx->tones[tx->symbols[tx->symbol]];
     const wspr_tone_t *next = &tx->tones[tx->symbols[++tx->symbol]];
@@ -379,7 +379,7 @@ static inline bool wspr_poll_transmitter(si5351a_i2c_t *clock, wspr_transmitter_
     }
     if (!ok) {
         tx->active = false;
-        si5351a_i2c_set_clk0_enabled(clock, false);
+        si5351a_i2c_set_outputs_enabled(clock, false);
     }
     return ok;
 }

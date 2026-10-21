@@ -97,6 +97,7 @@ typedef enum {
     SI5351A_ERROR_INVALID_OUTPUT_FREQUENCY,
 } si5351a_error_t;
 
+/* Both legs of the Traquito antenna use the same drive strength. */
 #ifndef SI5351A_CLK0_DRIVE
 #define SI5351A_CLK0_DRIVE SI5351A_DRIVE_8MA
 #endif
@@ -350,7 +351,8 @@ static inline bool si5351a_i2c_multisynth_from_frequency_ratio(
     return true;
 }
 
-/* Update CLK0's divider only.  Do not disable outputs or reset PLLA here:
+/* Update MultiSynth0 only; CLK1 follows its inverted fanout automatically.
+ * Do not disable outputs or reset PLLA here:
  * WSPR changes tone every 682.667 ms and doing either creates a visible gap
  * at every symbol boundary. */
 static inline bool si5351a_i2c_update_clk0_frequency_ratio(
@@ -369,10 +371,10 @@ static inline bool si5351a_i2c_update_clk0_frequency_ratio(
     return si5351a_i2c_write_multisynth(clock, 42u, p1, p2, p3, 0u, false);
 }
 
-static inline bool si5351a_i2c_set_clk0_enabled(si5351a_i2c_t *clock, bool enabled) {
-    /* Output enables are active low. Only CLK0 is used: idle disables every
-     * output, and transmitting must not enable any of CLK1..CLK7. */
-    return si5351a_i2c_write_reg(clock, 3u, enabled ? 0xfeu : 0xffu);
+static inline bool si5351a_i2c_set_outputs_enabled(si5351a_i2c_t *clock, bool enabled) {
+    /* Output enables are active low. Switch both antenna legs together in one
+     * write; CLK2..CLK7 stay disabled and idle disables every output. */
+    return si5351a_i2c_write_reg(clock, 3u, enabled ? 0xfcu : 0xffu);
 }
 
 static inline void si5351a_i2c_init_bus(
@@ -465,9 +467,21 @@ static inline bool si5351a_i2c_configure_output_hz_enabled(
         si5351a_i2c_set_error(clock, SI5351A_ERROR_MS0_CONFIG_FAILED, 42u);
         return false;
     }
-    /* Leave unused CLK1..CLK7 powered down by the register 16..23 loop above. */
+    /* CLK1 uses MultiSynth0's fanout, not its own MultiSynth. Explicitly set
+     * its downstream R divider to /1 to match CLK0, including after a restart. */
+    if (!si5351a_i2c_write_reg(clock, 52u, 0x00u)) {
+        si5351a_i2c_set_error(clock, SI5351A_ERROR_MS1_CONFIG_FAILED, 52u);
+        return false;
+    }
+    /* CLK0 selects MS0 normally. CLK1 selects that same signal and inverts it
+     * for the Traquito board's differential antenna feed. Both use 8 mA by
+     * default; unused CLK2..CLK7 remain powered down. */
     if (!si5351a_i2c_write_reg(clock, 16u, (uint8_t)(0x0cu | (SI5351A_CLK0_DRIVE & 0x03u)))) {
         si5351a_i2c_set_error(clock, SI5351A_ERROR_CLK0_CONTROL_FAILED, 16u);
+        return false;
+    }
+    if (!si5351a_i2c_write_reg(clock, 17u, (uint8_t)(0x18u | (SI5351A_CLK0_DRIVE & 0x03u)))) {
+        si5351a_i2c_set_error(clock, SI5351A_ERROR_CLK1_CONTROL_FAILED, 17u);
         return false;
     }
     if (!si5351a_i2c_write_reg(clock, 177u, 0x20u)) {
@@ -475,8 +489,8 @@ static inline bool si5351a_i2c_configure_output_hz_enabled(
         return false;
     }
 
-    if (!si5351a_i2c_set_clk0_enabled(clock, enabled)) {
-        si5351a_i2c_set_error(clock, enabled ? SI5351A_ERROR_ENABLE_CLK0_FAILED :
+    if (!si5351a_i2c_set_outputs_enabled(clock, enabled)) {
+        si5351a_i2c_set_error(clock, enabled ? SI5351A_ERROR_ENABLE_CLK0_CLK1_FAILED :
                               SI5351A_ERROR_DISABLE_OUTPUTS_FAILED, 3u);
         return false;
     }

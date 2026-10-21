@@ -256,6 +256,7 @@ int i2c_write_blocking(i2c_inst_t *i, uint8_t addr, const uint8_t *data, size_t 
     bool fail = false;
     if (sim.fault) {
         if (!strcmp(sim.fault, "init")) fail = data[0] == 42 && sim.fault_count == 0;
+        if (!strcmp(sim.fault, "clk1_init")) fail = n == 2 && data[0] == 17 && !(data[1] & 0x80u);
         if (!strcmp(sim.fault, "start")) fail = n == 2 && data[0] == 3 && !(data[1] & 1u);
         if (!strcmp(sim.fault, "symbol")) fail = sim.rf && data[0] >= 42 && now >= 20 * SECOND && sim.fault_count == 0;
         if (!strcmp(sim.fault, "disable")) fail = sim.rf && n == 2 && data[0] == 3 && (data[1] & 1u);
@@ -265,13 +266,27 @@ int i2c_write_blocking(i2c_inst_t *i, uint8_t addr, const uint8_t *data, size_t 
     /* Observe all eight outputs after every write, including initialization.
      * A silent CLK0 alone does not imply the clock generator is silent. */
     sim.outputs_ever_enabled |= (uint8_t)~sim.registers[3];
-    for (unsigned output = 1; output < 8; ++output) {
+    for (unsigned output = 2; output < 8; ++output) {
         if (!(sim.registers[16 + output] & 0x80u)) {
             sim.unused_outputs_ever_powered |= (uint8_t)(1u << output);
         }
     }
+    /* Never drive a single antenna leg. While enabled, both drivers must use
+     * MS0 at equal strength, with opposite polarity and matching /1 R dividers. */
+    uint8_t pair_disabled = sim.registers[3] & 3u;
+    assert(pair_disabled == 0u || pair_disabled == 3u);
+    if (pair_disabled == 0u) {
+        assert((sim.registers[16] & 0x80u) == 0 && (sim.registers[17] & 0x80u) == 0);
+        assert((sim.registers[16] & 0x0cu) == 0x0cu);
+        assert((sim.registers[17] & 0x0cu) == 0x08u);
+        assert(((sim.registers[16] ^ sim.registers[17]) & 0x10u) != 0);
+        assert((sim.registers[16] & 3u) == SI5351A_CLK0_DRIVE);
+        assert((sim.registers[17] & 3u) == SI5351A_CLK0_DRIVE);
+        assert((sim.registers[187] & 0x10u) != 0);
+        assert((sim.registers[44] & 0x70u) == 0 && (sim.registers[52] & 0x70u) == 0);
+    }
     if (n > 1 && data[0] == 3) {
-        bool rf = !(sim.registers[3] & 1u);
+        bool rf = pair_disabled == 0u;
         if (rf && !sim.rf) {
             assert(sim.frame_count < MAX_FRAMES);
             frame_t *frame = &sim.frames[sim.frame_count++];
@@ -373,6 +388,7 @@ static void configure(const char *name) {
     else if (!strcmp(name, "usb_backpressure")) {
         sim.usb_blocked = true; serial_byte(11 * SECOND, 'g');
     } else if (!strcmp(name, "i2c_init_failure")) sim.fault = "init";
+    else if (!strcmp(name, "i2c_clk1_init_failure")) sim.fault = "clk1_init";
     else if (!strcmp(name, "i2c_start_failure")) sim.fault = "start";
     else if (!strcmp(name, "i2c_symbol_failure")) sim.fault = "symbol";
     else if (!strcmp(name, "i2c_disable_failure")) sim.fault = "disable";

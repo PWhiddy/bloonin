@@ -1,6 +1,9 @@
 ### Bloonin
 
-The firmware runs the WSPR beacon on CLK0. The default RF tone-zero frequency
+The firmware runs the WSPR beacon on complementary CLK0/CLK1 outputs, matching
+the Traquito Jetpack's two transmitter antenna pads. Both use 8 mA drive by
+default; CLK1 is an inverted fanout of MultiSynth0, so both legs follow every
+tone change and switch on/off together. The default RF tone-zero frequency
 is 14.097100 MHz (20 m), configured by `WSPR_BASE_HZ` in `wspr.h`. This is the
 actual RF frequency; a receiver uses the 14.095600 MHz USB dial frequency
 ([WSJT-X WSPR guide](https://wsjt.sourceforge.io/wsjtx-main_en.html#_wspr_mode)).
