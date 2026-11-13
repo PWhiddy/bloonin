@@ -1,12 +1,31 @@
 """Run from the repository root: python3 -m unittest discover -s tests -p 'test_wspr_decode.py'."""
 
+import csv
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
-from wspr_decode import decode_telemetry, locator_to_payload
+from wspr_decode import decode_reports, decode_telemetry, locator_to_payload
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "wspr_decode.py"
+
+
+def sequence_rows(start="2026-10-20 20:52:00"):
+    """The independently checked firmware Munich example, with four receivers."""
+    base = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+    rows = []
+    for index, (call, locator) in enumerate((
+            ("ZL3XYZ", "JN58"), ("ZL3XYF", "EC31"),
+            ("ZL3XYA", "RM93"), ("ZL3XYT", "KR45"))):
+        rows.append(dict(id=str(index + 1),
+                         time_utc=(base + timedelta(minutes=2 * index)).strftime("%Y-%m-%d %H:%M:%S"),
+                         band="14", tx_sign=call, tx_loc=locator, rx_sign=f"RX{index}"))
+    return rows
 
 
 class DecoderTests(unittest.TestCase):
@@ -109,6 +128,173 @@ class DecoderTests(unittest.TestCase):
         )
         self.assertEqual(invalid.returncode, 2)
         self.assertIn("fine: payload must be in 0..32399", invalid.stderr)
+
+
+class CsvDecoderTests(unittest.TestCase):
+    def test_full_sequence_merges_receivers_unsorted_rows_and_duplicates(self):
+        rows = sequence_rows()
+        rows.append(dict(rows[1], id="5", rx_sign="RX_OTHER"))
+        rows.append(dict(rows[1]))
+        messages, warnings = decode_reports(reversed(rows))
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(messages), 1)
+        message = messages[0]
+        expected = decode_telemetry("JN58", "EC31", "RM93", "KR45")
+        for key, value in expected.items():
+            if key != "bounds":
+                self.assertEqual(message[key], value)
+        for key, value in expected["bounds"].items():
+            self.assertEqual(message[key], value)
+        self.assertEqual(message["time_utc"], "2026-10-20 20:52:00")
+        self.assertEqual(message["last_report_time_utc"], "2026-10-20 20:58:00")
+        self.assertEqual(message["status"], "complete")
+        self.assertEqual(message["position_precision"], "extra_fine")
+        self.assertEqual(message["report_count"], 5)
+        self.assertEqual(message["receiver_count"], 5)
+        self.assertEqual(message["fine_reports"], 2)
+        self.assertEqual(message["spot_ids"], "1;2;3;4;5")
+
+    def test_missing_frames_are_not_borrowed_from_next_sequence(self):
+        first = sequence_rows()
+        second = sequence_rows("2026-10-20 21:00:00")
+        second[0]["tx_loc"] = "JN69"
+        messages, warnings = decode_reports(first[:2] + second)
+        self.assertFalse(warnings)
+        partial, complete = messages
+        self.assertEqual(partial["status"], "incomplete")
+        self.assertEqual(partial["missing_callsigns"], "ZL3XYA;ZL3XYT")
+        self.assertIsNone(partial["altitude_meters"])
+        self.assertIsNone(partial["temperature_celsius"])
+        self.assertEqual(partial["position_precision"], "fine")
+        self.assertAlmostEqual(partial["north"] - partial["south"], 1 / 180)
+        self.assertEqual(complete["status"], "complete")
+        self.assertEqual(complete["coarse_grid"], "JN69")
+
+    def test_orphan_frames_and_missing_fine_do_not_invent_a_position(self):
+        rows = sequence_rows()
+        messages, _ = decode_reports(rows[1:])
+        orphan = messages[0]
+        self.assertEqual(orphan["time_utc"], rows[0]["time_utc"])
+        self.assertIsNone(orphan["latitude"])
+        self.assertIsNone(orphan["west"])
+        self.assertEqual(orphan["altitude_meters"], 123)
+        self.assertEqual(orphan["temperature_celsius"], 27)
+        messages, _ = decode_reports([rows[0], rows[2], rows[3]])
+        coarse = messages[0]
+        self.assertEqual(coarse["position_precision"], "coarse")
+        self.assertEqual(coarse["latitude"], 48.5)
+        self.assertEqual(coarse["longitude"], 11)
+        self.assertEqual(coarse["temperature_celsius"], 27)
+
+    def test_conflicting_payloads_are_exposed_without_picking_a_receiver(self):
+        rows = sequence_rows()
+        rows.append(dict(rows[1], id="5", rx_sign="RX_OTHER", tx_loc="EC32"))
+        message = decode_reports(rows)[0][0]
+        self.assertEqual(message["status"], "conflict")
+        self.assertEqual(message["conflicting_callsigns"], "ZL3XYF")
+        self.assertEqual(message["fine_locator"], "EC31;EC32")
+        self.assertIsNone(message["fine_payload"])
+        self.assertEqual(message["position_precision"], "coarse")
+        self.assertEqual(message["altitude_meters"], 123)
+
+    def test_zero_payloads_are_present_and_valid(self):
+        rows = sequence_rows()
+        for row in rows:
+            row["tx_loc"] = "RA90"  # Locator payload zero, not missing.
+        message = decode_reports(rows)[0][0]
+        self.assertEqual(message["status"], "complete")
+        self.assertEqual(message["altitude_meters"], 0)
+        self.assertEqual(message["temperature_celsius"], -80)
+        self.assertEqual(message["fine_payload"], 0)
+        self.assertEqual(message["position_precision"], "extra_fine")
+
+    def test_bad_locators_times_and_other_bands(self):
+        rows = sequence_rows()
+        rows.extend((dict(rows[2], tx_loc="CN89of"),
+                     dict(rows[0], time_utc="not a date"),
+                     dict(rows[0], time_utc="2026-10-20 20:53:00"),
+                     dict(rows[0], tx_sign="UNRELATED"),
+                     dict(rows[0], band="7")))
+        messages, warnings = decode_reports(rows)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["report_count"], 4)
+        self.assertEqual(len(warnings), 3)
+        self.assertIn("CSV row 6", warnings[0])
+        self.assertIn("even-minute WSPR slot", warnings[2])
+
+    def test_midnight_and_timezone_offsets(self):
+        rows = sequence_rows("2026-10-20 23:58:00")
+        rows[1]["time_utc"] = "2026-10-21T01:00:00+01:00"
+        messages, warnings = decode_reports(rows)
+        self.assertFalse(warnings)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["time_utc"], "2026-10-20 23:58:00")
+        self.assertEqual(messages[0]["last_report_time_utc"], "2026-10-21 00:04:00")
+        self.assertEqual(messages[0]["status"], "complete")
+
+    def test_no_argument_cli_writes_csv_and_json_option_preserves_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "wspr_20m.csv"
+            rows = sequence_rows()
+            rows.extend(sequence_rows("2026-10-20 21:00:00")[:2])
+            conflicting = sequence_rows("2026-10-20 21:08:00")
+            conflicting.append(dict(conflicting[1], id="99", tx_loc="EC32"))
+            rows.extend(conflicting)
+            with source.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=rows[0])
+                writer.writeheader()
+                writer.writerows(rows)
+            original = source.read_bytes()
+            result = subprocess.run([sys.executable, str(SCRIPT)], cwd=directory,
+                                    check=True, capture_output=True, text=True)
+            self.assertIn("1 complete", result.stderr)
+            self.assertIn("Skipped 2 incomplete/conflicting", result.stderr)
+            self.assertIn("Time (UTC)", result.stdout)
+            self.assertIn("48.117222° N", result.stdout)
+            self.assertIn("11.516667° E", result.stdout)
+            self.assertIn("123 m", result.stdout)
+            self.assertIn("27 °C", result.stdout)
+            self.assertNotIn("21:00:00", result.stdout)
+            self.assertNotIn("21:08:00", result.stdout)
+            with (Path(directory) / "wspr_20m_decoded.csv").open(newline="") as stream:
+                records = list(csv.DictReader(stream))
+            self.assertEqual(len(records), 1)
+            self.assertEqual(set(records[0]), {"time_utc", "latitude", "longitude",
+                                               "altitude_meters", "temperature_celsius"})
+            self.assertEqual(records[0]["latitude"], "48.117222")
+            self.assertEqual(records[0]["longitude"], "11.516667")
+            self.assertEqual(records[0]["temperature_celsius"], "27")
+            self.assertEqual(records[0]["altitude_meters"], "123")
+            self.assertEqual(source.read_bytes(), original)
+            custom = Path(directory) / "custom.csv"
+            result = subprocess.run([sys.executable, str(SCRIPT), "--input", str(source),
+                                     "--output", str(custom), "--json"],
+                                    check=True, capture_output=True, text=True)
+            decoded = json.loads(result.stdout)
+            self.assertEqual(len(decoded), 1)
+            self.assertEqual(set(decoded[0]), set(records[0]))
+            self.assertEqual(decoded[0]["temperature_celsius"], 27)
+            self.assertTrue(custom.exists())
+            result = subprocess.run([sys.executable, str(SCRIPT), "--input", str(source),
+                                     "--output", str(source)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("must differ", result.stderr)
+            self.assertEqual(source.read_bytes(), original)
+
+    def test_empty_csv_and_missing_columns(self):
+        self.assertEqual(decode_reports([]), ([], []))
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "wspr_20m.csv"
+            source.write_text("time_utc,band,tx_sign,tx_loc\n")
+            result = subprocess.run([sys.executable, str(SCRIPT)], cwd=directory,
+                                    check=True, capture_output=True, text=True)
+            self.assertIn("0 complete decodes", result.stderr)
+            self.assertEqual(result.stdout.strip(), "No complete telemetry messages yet.")
+            source.write_text("wrong,columns\n")
+            result = subprocess.run([sys.executable, str(SCRIPT)], cwd=directory,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("CSV missing required columns", result.stderr)
 
 
 if __name__ == "__main__":

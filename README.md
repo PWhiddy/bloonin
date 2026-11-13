@@ -91,3 +91,20 @@ cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
 python3 tests/run_simulation.py
 python3 -m unittest discover -s tests -p 'test_wspr_decode.py'
 ```
+
+### Collect and decode WSPR reports
+
+```sh
+python3 wspr_collect.py  # Backfill history and poll every 120 seconds
+python3 wspr_decode.py   # Run in another terminal to decode the current CSV
+```
+
+The collector saves 20 m reports for `ZL3XYZ`, `ZL3XYF`, `ZL3XYA`, and `ZL3XYT`
+from [WSPR Live](https://wspr.live/) to `wspr_20m.csv`. Keep its `.sqlite3`
+sidecar; stop with Ctrl-C and rerun to resume. Use `--since YYYY-MM-DD` to limit
+initial history or `--once` to update and exit.
+
+The decoder prints **complete, unambiguous messages only** and writes
+`wspr_20m_decoded.csv`: UTC time, GPS coordinates in decimal degrees, altitude
+in meters, and Pico chip temperature in °C. Rerun it to refresh the output.
+Use `--help` on either script for file paths and other options.
