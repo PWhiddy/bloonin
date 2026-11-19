@@ -135,7 +135,7 @@ static void test_transmitter(void) {
     assert(wspr_prepare(&clock, &tx, "K1ABC", "FN30", 10));
     assert(test_registers[3] == 0xffu);
     assert(test_outputs_ever_enabled == 0);
-    assert(WSPR_BASE_HZ == 14097100u);
+    assert(WSPR_BASE_HZ == 14097150u);
     assert(wspr_start(&clock, &tx, 1000000));
     assert(test_registers[3] == 0xfcu);
     unsigned writes = test_writes;
@@ -157,7 +157,7 @@ static void test_transmitter(void) {
         uint32_t p2 = ((test_registers[47] & 15u) << 16) | (test_registers[48] << 8) | test_registers[49];
         double divider = (p1 + 512.0 + (double)p2 / p3) / 128.0;
         double hz = SI5351A_PLL_HZ / divider;
-        double expected = 14097100.0 + tx.symbols[symbol] * 375.0 / 256.0;
+        double expected = WSPR_BASE_HZ + tx.symbols[symbol] * 375.0 / 256.0;
         /* The existing 20-bit divider rounding permits about 0.11 Hz error. */
         assert(fabs(hz - expected) < 0.12);
     }

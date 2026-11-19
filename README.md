@@ -3,9 +3,10 @@
 The firmware runs the WSPR beacon on complementary CLK0/CLK1 outputs, matching
 the Traquito Jetpack's two transmitter antenna pads. Both use 8 mA drive by
 default; CLK1 is an inverted fanout of MultiSynth0, so both legs follow every
-tone change and switch on/off together. The default RF tone-zero frequency
-is 14.097100 MHz (20 m), configured by `WSPR_BASE_HZ` in `wspr.h`. This is the
-actual RF frequency; a receiver uses the 14.095600 MHz USB dial frequency
+tone change and switch on/off together. The X-family beacon (`ZL3XXZ`) uses
+14.097150 MHz for tone zero, 50 Hz above the original Y-family beacon
+(`ZL3XYZ`) at 14.097100 MHz. `WSPR_BASE_HZ` in `wspr.h` sets the RF frequency
+for all four frames. A receiver uses the 14.095600 MHz USB dial frequency for both
 ([WSJT-X WSPR guide](https://wsjt.sourceforge.io/wsjtx-main_en.html#_wspr_mode)).
 
 ```

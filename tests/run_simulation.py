@@ -38,7 +38,8 @@ def decode_frame(tones):
     This tests the emitted message, not just whether its tone count is 162.
     """
     assert len(tones) == 162
-    symbols = [round((hz - 14097100) / (375 / 256)) for _, hz in tones]
+    base_hz = 14_097_150
+    symbols = [round((hz - base_hz) / (375 / 256)) for _, hz in tones]
     assert all(0 <= s <= 3 for s in symbols)
     sync = [
         1,1,0,0,0,0,0,0,1,0,0,0,1,1,1,0,0,0,1,0,0,1,
@@ -51,7 +52,7 @@ def decode_frame(tones):
         0,0,0,1,1,0,0,0,
     ]
     assert [symbol & 1 for symbol in symbols] == sync, "invalid WSPR synchronization sequence"
-    assert all(abs(hz - (14097100 + s * 375 / 256)) < 0.12
+    assert all(abs(hz - (base_hz + s * 375 / 256)) < 0.12
                for (_, hz), s in zip(tones, symbols))
     destinations = [int(f"{i:08b}"[::-1], 2) for i in range(256)]
     coded = [symbols[i] >> 1 for i in destinations if i < 162]

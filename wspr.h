@@ -22,7 +22,7 @@
 #define WSPR_SYMBOL_PERIOD_DENOMINATOR 12000u
 /* Actual RF tone-zero frequency, not the receiver's USB dial frequency. */
 #ifndef WSPR_BASE_HZ
-#define WSPR_BASE_HZ 14097100u
+#define WSPR_BASE_HZ 14097150u
 #endif
 #define WSPR_SLOT_PERIOD_US 120000000ll
 #define WSPR_TONE_DENOMINATOR 256u
