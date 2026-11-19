@@ -18,17 +18,13 @@ import re
 import sys
 import tempfile
 
+from wspr_callsigns import FRAMES_BY_VARIANT
 
-# Same order as wspr_beacon_message(); each frame uses the same frozen fix.
-FRAMES = (
-    ("coarse", "ZL3XYZ", 32399),
-    ("fine", "ZL3XYF", 32399),
-    ("altitude", "ZL3XYA", 32767),
-    ("extra", "ZL3XYT", 28799),
-)
+# Positional payloads have no callsign; their field order is shared by X and Y.
+FRAMES = FRAMES_BY_VARIANT["X"]
 SLOT_SECONDS = 120
 CSV_FIELDS = (
-    "time_utc", "latitude", "longitude", "altitude_meters", "temperature_celsius",
+    "time_utc", "variant", "latitude", "longitude", "altitude_meters", "temperature_celsius",
 )
 
 
@@ -131,11 +127,12 @@ def decode_reports(rows):
     """Return chronological sequence records and diagnostics for invalid rows.
 
     A frame's callsign determines its offset from the coarse frame. Never carry
-    a field across sequences or infer a global eight-minute UTC alignment.
+    a field across sequences/variants or infer a global eight-minute UTC alignment.
     Conflicting payloads remain ambiguous rather than choosing a receiver.
     """
-    by_call = {call: (index, name, maximum)
-               for index, (name, call, maximum) in enumerate(FRAMES)}
+    by_call = {call: (variant, index, name, maximum)
+               for variant, definitions in FRAMES_BY_VARIANT.items()
+               for index, (name, call, maximum) in enumerate(definitions)}
     groups = {}
     warnings = []
     for row_number, row in enumerate(rows, 2):
@@ -143,7 +140,7 @@ def decode_reports(rows):
             call = row["tx_sign"].strip().upper()
             if call not in by_call or int(row["band"]) != 14:
                 continue
-            index, name, maximum = by_call[call]
+            variant, index, name, maximum = by_call[call]
             date = datetime.fromisoformat(row["time_utc"].strip().replace("Z", "+00:00"))
             if date.tzinfo is None:
                 date = date.replace(tzinfo=timezone.utc)
@@ -159,9 +156,9 @@ def decode_reports(rows):
             warnings.append(f"CSV row {row_number}: {error}; skipped")
             continue
         start = when - index * SLOT_SECONDS
-        frames = groups.setdefault(start, {})
-        variants = frames.setdefault(name, {})
-        report = variants.setdefault(payload, {"locators": set(), "reports": set(),
+        frames = groups.setdefault((start, variant), {})
+        payload_reports = frames.setdefault(name, {})
+        report = payload_reports.setdefault(payload, {"locators": set(), "reports": set(),
                                                 "receivers": set(), "ids": set()})
         report["locators"].add(locator)
         # Duplicate CSV rows must not inflate report counts.
@@ -172,29 +169,30 @@ def decode_reports(rows):
             report["ids"].add(spot_id)
 
     messages = []
-    for start, frames in sorted(groups.items()):
+    for (start, variant), frames in sorted(groups.items()):
+        definitions = FRAMES_BY_VARIANT[variant]
         payloads = [next(iter(frames[name])) if len(frames.get(name, {})) == 1 else None
-                    for name, _, _ in FRAMES]
+                    for name, _, _ in definitions]
         decoded = decode_payloads(*payloads)
         bounds = decoded.pop("bounds")
-        missing = [call for name, call, _ in FRAMES if name not in frames]
-        conflicting = [call for name, call, _ in FRAMES if len(frames.get(name, {})) > 1]
+        missing = [call for name, call, _ in definitions if name not in frames]
+        conflicting = [call for name, call, _ in definitions if len(frames.get(name, {})) > 1]
         precision = ("" if payloads[0] is None else "coarse" if payloads[1] is None
                      else "fine" if payloads[3] is None else "extra_fine")
-        last_index = max(index for index, (name, _, _) in enumerate(FRAMES) if name in frames)
-        message = dict(time_utc=utc_string(start),
+        last_index = max(index for index, (name, _, _) in enumerate(definitions) if name in frames)
+        message = dict(time_utc=utc_string(start), variant=variant,
                        last_report_time_utc=utc_string(start + last_index * SLOT_SECONDS),
                        status="conflict" if conflicting else "incomplete" if missing else "complete",
                        missing_callsigns=";".join(missing), conflicting_callsigns=";".join(conflicting),
                        position_precision=precision, **decoded, **bounds)
         receivers, ids, reports = set(), set(), set()
-        for name, _, _ in FRAMES:
+        for name, _, _ in definitions:
             locators, frame_reports = set(), set()
-            for variant in frames.get(name, {}).values():
-                locators.update(variant["locators"])
-                frame_reports.update(variant["reports"])
-                receivers.update(variant["receivers"])
-                ids.update(variant["ids"])
+            for report in frames.get(name, {}).values():
+                locators.update(report["locators"])
+                frame_reports.update(report["reports"])
+                receivers.update(report["receivers"])
+                ids.update(report["ids"])
             reports.update((name, report) for report in frame_reports)
             message[name + "_locator"] = ";".join(sorted(locators))
             message[name + "_reports"] = len(frame_reports)
@@ -230,11 +228,11 @@ def print_messages(messages):
     if not messages:
         print("No complete telemetry messages yet.")
         return
-    headers = ("Time (UTC)", "Latitude", "Longitude", "Altitude", "Chip temperature")
+    headers = ("Time (UTC)", "Variant", "Latitude", "Longitude", "Altitude", "Chip temperature")
     rows = [headers]
     for message in messages:
         latitude, longitude = message["latitude"], message["longitude"]
-        rows.append((message["time_utc"],
+        rows.append((message["time_utc"], message["variant"],
                      f"{abs(latitude):.6f}° {'N' if latitude >= 0 else 'S'}",
                      f"{abs(longitude):.6f}° {'E' if longitude >= 0 else 'W'}",
                      f"{message['altitude_meters']} m",

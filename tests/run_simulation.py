@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = [
     "diag_no_data", "diag_uart_errors", "temp_cold", "temp_hot",
     "no_altitude", "gps_priority", "gps_late_reacquire", "no_inputs", "usb_waiting", "gps_no_usb", "gps_usb", "serial_only",
-    "simultaneous", "gps_during_serial_frame", "gps_loss", "gps_silent",
+    "led_on_at_start", "simultaneous", "gps_during_serial_frame", "gps_loss", "gps_silent",
     "gps_reacquire", "moving", "midnight", "fractional", "near_slot_before",
     "near_slot_after", "altitude_after_slot", "time_only", "location_only", "malformed", "noisy_uart",
     "usb_reconnect", "usb_backpressure", "i2c_init_failure", "i2c_clk1_init_failure", "i2c_start_failure",
@@ -93,6 +93,33 @@ def check_report(report):
     assert report["uart_read"] == report["uart_bytes"], "GPS monitoring stopped early"
     logs = sorted(report["logs"], key=lambda item: item["at_us"])
     texts = [item["text"] for item in logs]
+    led_edges = report["led_edges"]
+    assert not any(edge["rf"] for edge in led_edges), "LED changed while RF was active"
+    for index, edge in enumerate(led_edges):
+        assert edge["on"] == (index % 2 == 0), "LED edges must alternate"
+        if not edge["on"]:
+            # A state transition may shorten a pulse, but never stretch it.
+            assert 0 < edge["at_us"] - led_edges[index - 1]["at_us"] <= 50_600
+    pulses = [edge for edge in led_edges if edge["on"]]
+    if name in {"no_inputs", "usb_waiting", "no_altitude"}:
+        assert pulses and not any(edge["rf"] for edge in pulses)
+        assert abs(pulses[0]["at_us"] - 4_000_000) <= 600
+        assert all(abs(b["at_us"] - a["at_us"] - 4_000_000) <= 600
+                   for a, b in zip(pulses, pulses[1:]))
+    if name == "gps_usb":
+        before_rf = [edge for edge in pulses if edge["at_us"] < frames[0]["start_us"]]
+        assert len(before_rf) == 1 and 10_000_000 <= before_rf[0]["at_us"] < 11_000_000
+        between = [edge for edge in pulses
+                   if frames[0]["end_us"] < edge["at_us"] < frames[1]["start_us"]]
+        assert len(between) == 1
+        assert abs(between[0]["at_us"] - frames[0]["end_us"] - 8_000_000) <= 1000
+    if name == "led_on_at_start":
+        assert abs(led_edges[0]["at_us"] - 4_000_000) <= 600
+        assert not led_edges[1]["on"]
+        assert 0 < frames[0]["start_us"] - led_edges[1]["at_us"] <= 1000
+    if name in {"gps_loss", "gps_silent"}:
+        after = [edge for edge in pulses if edge["at_us"] > frames[-1]["end_us"]]
+        assert after and abs(after[0]["at_us"] - frames[-1]["end_us"] - 4_000_000) <= 1000
     if name.startswith("diag_"):
         diagnostics = [t for t in texts if t.startswith("GPS DIAG:")]
         assert len(diagnostics) == 6, diagnostics
@@ -120,6 +147,8 @@ def check_report(report):
         expected_starts = expected_grids = []
     elif name == "serial_only":
         expected_grids = [report["fallback_grid"]] * 2
+    elif name == "led_on_at_start":
+        expected_starts, expected_grids = [4.02], [report["fallback_grid"]]
     elif name == "gps_during_serial_frame":
         expected_starts, expected_grids = [1, 131], [report["fallback_grid"], "JN58"]
     elif name in {"moving", "gps_priority"}:
@@ -144,13 +173,17 @@ def check_report(report):
     for frame_index, (frame, start, grid) in enumerate(zip(frames, expected_starts, expected_grids)):
         # UART start capture, polling and I2C wire time introduce sub-ms error.
         assert abs(frame["start_us"] - start * 1_000_000) <= 3000, frame["start_us"]
+        if frame["end_us"] and not name.startswith("i2c_"):
+            during = [edge for edge in led_edges
+                      if frame["start_us"] <= edge["at_us"] < frame["end_us"]]
+            assert not during, "LED activity during a transmission"
         if name == "i2c_symbol_failure":
             assert 20_000_000 <= frame["end_us"] < 21_000_000
             assert 1 < len(frame["tones"]) < 162
             continue
         decoded.append(decode_frame(frame["tones"]))
         gps_index = frame_index - (1 if name == "gps_during_serial_frame" else 0)
-        phase = gps_index % 4 if name != "serial_only" and gps_index >= 0 else 0
+        phase = gps_index % 4 if name not in {"serial_only", "led_on_at_start"} and gps_index >= 0 else 0
         call = report[["callsign", "callsign_fine", "callsign_alt", "callsign_temp"][phase]].upper()
         assert decoded[-1]["callsign"] == call, decoded[-1]
         assert decoded[-1]["power_dbm"] == report["power_dbm"]
@@ -177,7 +210,7 @@ def check_report(report):
             assert abs(frame["end_us"] - frame["start_us"] - 110_592_000) <= 600
     # One discarded ADC read plus 16 averaged samples per new GPS snapshot.
     if not name.startswith("i2c_"):
-        snapshots = 0 if name == "serial_only" else sum(
+        snapshots = 0 if name in {"serial_only", "led_on_at_start"} else sum(
             (i - (1 if name == "gps_during_serial_frame" else 0)) >= 0 and
             (i - (1 if name == "gps_during_serial_frame" else 0)) % 4 == 0
             for i in range(len(frames)))

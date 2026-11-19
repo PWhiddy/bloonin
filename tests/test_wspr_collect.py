@@ -16,7 +16,7 @@ import wspr_collect as collector
 START = collector.timestamp("2026-11-01")
 
 
-def spot(number, second=0, receiver="RX1", call="ZL3XYZ"):
+def spot(number, second=0, receiver="RX1", call="ZL3XXZ"):
     row = dict.fromkeys(collector.FIELDS, 0)
     row.update(id=str(number), time_utc=collector.utc(START + second), band=14,
                tx_sign=call, tx_loc="EC31", rx_sign=receiver, rx_loc="JN58aa",
@@ -52,13 +52,15 @@ class StoreTests(unittest.TestCase):
     def test_pagination_keeps_all_receivers_and_calls_at_same_timestamp(self):
         rows = [spot(i, receiver=f"RX{i}", call=call)
                 for i, call in enumerate(collector.CALLSIGNS, 1)]
-        client = FakeClient(rows[:2], rows[2:], [])
+        client = FakeClient(*(rows[i:i + 2] for i in range(0, len(rows), 2)), [])
         collector.sync_window(client, self.store, START, START + 120, page_size=2)
-        self.assertEqual([row["id"] for row in self.rows()], ["1", "2", "3", "4"])
-        self.assertEqual(len(client.queries), 3)
+        self.assertEqual([row["id"] for row in self.rows()], [str(i) for i in range(1, 9)])
+        self.assertEqual(len(client.queries), 5)
         self.assertIn(f"(time, id) > (toDateTime({START}, 'UTC'), 2)", client.queries[1])
         self.assertIn("band = 14", client.queries[0])
-        self.assertIn("tx_sign IN ('ZL3XYZ', 'ZL3XYF', 'ZL3XYA', 'ZL3XYT')", client.queries[0])
+        self.assertIn("tx_sign IN ('ZL3XXZ', 'ZL3XXF', 'ZL3XXA', 'ZL3XXT', "
+                      "'ZL3XYZ', 'ZL3XYF', 'ZL3XYA', 'ZL3XYT')", client.queries[0])
+        self.assertEqual({row["tx_sign"] for row in self.rows()}, set(collector.CALLSIGNS))
         self.assertIn("LIMIT 2 FORMAT JSON", client.queries[0])
 
     def test_restart_deduplication_corrections_and_csv_recovery(self):
@@ -87,6 +89,30 @@ class StoreTests(unittest.TestCase):
         collector.sync_window(FakeClient([spot(1), spot(2)], [spot(3)]),
                               self.store, START, START + 120, page_size=2)
         self.assertEqual(len(self.rows()), 3)
+
+    def test_legacy_checkpoint_rescans_both_families_once_without_losing_reports(self):
+        self.store.add([spot(1, call="ZL3XYZ")])
+        for previous_calls in (None, ["ZL3XXZ", "ZL3XXF", "ZL3XXA", "ZL3XXT"]):
+            with self.subTest(previous_calls=previous_calls):
+                self.store.state.update(live_through=START + 600, history_before=START,
+                                        rescan_at=START + collector.DAY)
+                if previous_calls is None:
+                    self.store.state.pop("callsigns", None)
+                else:
+                    self.store.state["callsigns"] = previous_calls
+                self.store.save()
+                self.store.close()
+                self.store = collector.Store(self.output, None, START + 7200)
+                self.assertEqual(self.store.state["live_through"], START + 600)
+                self.assertEqual(self.store.state["history_before"], START + 600)
+                self.assertEqual(set(self.store.state["callsigns"]), set(collector.CALLSIGNS))
+                self.assertEqual(self.rows()[0]["tx_sign"], "ZL3XYZ")
+                # Completing that backfill must not restart it on another launch.
+                self.store.state["history_before"] = START
+                self.store.save()
+                self.store.close()
+                self.store = collector.Store(self.output, None, START + 7300)
+                self.assertEqual(self.store.state["history_before"], START)
 
     def test_overlap_finds_delayed_report_and_advances_through_empty_intervals(self):
         collector.sync_live(FakeClient([spot(1)]), self.store, START + 120, 3600)

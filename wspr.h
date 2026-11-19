@@ -31,19 +31,19 @@
 /* These defaults are syntactically valid WSPR type-1 fields, not station
  * identities. */
 #ifndef WSPR_CALLSIGN
-#define WSPR_CALLSIGN "ZL3XYZ"
+#define WSPR_CALLSIGN "ZL3XXZ"
 #endif
 
 #ifndef WSPR_CALLSIGN_FINE
-#define WSPR_CALLSIGN_FINE "ZL3XYF"
+#define WSPR_CALLSIGN_FINE "ZL3XXF"
 #endif
 
 #ifndef WSPR_CALLSIGN_ALT
-#define WSPR_CALLSIGN_ALT "ZL3XYA"
+#define WSPR_CALLSIGN_ALT "ZL3XXA"
 #endif
 
 #ifndef WSPR_CALLSIGN_TEMP
-#define WSPR_CALLSIGN_TEMP "ZL3XYT"
+#define WSPR_CALLSIGN_TEMP "ZL3XXT"
 #endif
 
 #define WSPR_SEQUENCE_LENGTH 4u

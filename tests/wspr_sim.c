@@ -27,6 +27,7 @@ static int sim_printf(const char *format, ...);
 typedef struct { int64_t at; char byte; } input_byte_t;
 typedef struct { int64_t at; char text[512]; bool delivered; } log_t;
 typedef struct { int64_t at; double hz; } tone_t;
+typedef struct { int64_t at; bool on, rf; } led_edge_t;
 typedef struct {
     int64_t start, end;
     unsigned count;
@@ -58,6 +59,9 @@ static struct {
     unsigned fault_count;
     frame_t frames[MAX_FRAMES];
     unsigned frame_count;
+    bool led_on;
+    led_edge_t led_edges[2048];
+    unsigned led_count;
     log_t logs[MAX_LOGS];
     unsigned log_count, dropped;
     pthread_mutex_t log_lock;
@@ -130,10 +134,22 @@ void multicore_launch_core1(void (*entry)(void)) {
     sim.core1_entry = entry;
     assert(pthread_create(&sim.threads[1], NULL, run_core1, NULL) == 0);
 }
+static void sim_set_led(bool on) {
+    assert(core == 0);
+    assert(!sim.rf); // No LED driver calls, including redundant writes, on air.
+    if (on != sim.led_on) {
+        assert(sim.led_count < 2048u);
+        sim.led_edges[sim.led_count++] = (led_edge_t){now, on, sim.rf};
+        sim.led_on = on;
+    }
+    // Include a small GPIO-write cost in RF deadline checks.
+    sleep_us(1u);
+}
+
 static void *run_core0(void *unused) {
     (void)unused;
     core = 0;
-    wspr_run_beacon();
+    wspr_run_beacon(sim_set_led);
     abort();
 }
 
@@ -276,6 +292,7 @@ int i2c_write_blocking(i2c_inst_t *i, uint8_t addr, const uint8_t *data, size_t 
     uint8_t pair_disabled = sim.registers[3] & 3u;
     assert(pair_disabled == 0u || pair_disabled == 3u);
     if (pair_disabled == 0u) {
+        assert(!sim.led_on);
         assert((sim.registers[16] & 0x80u) == 0 && (sim.registers[17] & 0x80u) == 0);
         assert((sim.registers[16] & 0x0cu) == 0x0cu);
         assert((sim.registers[17] & 0x0cu) == 0x08u);
@@ -354,6 +371,10 @@ static void configure(const char *name) {
         serial_byte(SECOND, 'x'); serial_byte(2 * SECOND, '\n');
         serial_byte(11 * SECOND, 'g'); serial_byte(131 * SECOND, 'g');
         serial_byte(12 * SECOND, 'g'); serial_byte(20 * SECOND, 'g'); serial_byte(120 * SECOND, 'g');
+    } else if (!strcmp(name, "led_on_at_start")) {
+        sim.gps = false;
+        sim.duration = 120 * SECOND;
+        serial_byte(4 * SECOND + 20000, 'g'); // Interrupt the first 50 ms LED pulse.
     } else if (!strcmp(name, "simultaneous")) {
         serial_byte(11 * SECOND, 'g'); serial_byte(11 * SECOND + 500, 'g');
         serial_byte(131 * SECOND, 'g');
@@ -467,6 +488,12 @@ static void report(void) {
             printf("%s[%lld,%.9f]", j ? "," : "", (long long)frame->tones[j].at, frame->tones[j].hz);
         }
         fputs("]}", stdout);
+    }
+    fputs("],\"led_edges\":[", stdout);
+    for (unsigned i = 0; i < sim.led_count; ++i) {
+        led_edge_t *edge = &sim.led_edges[i];
+        printf("%s{\"at_us\":%lld,\"on\":%s,\"rf\":%s}", i ? "," : "",
+               (long long)edge->at, edge->on ? "true" : "false", edge->rf ? "true" : "false");
     }
     fputs("],\"logs\":[", stdout);
     for (unsigned i = 0; i < sim.log_count; ++i) {

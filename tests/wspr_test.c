@@ -340,6 +340,55 @@ static void test_gps_diagnostics(void) {
     assert(strcmp(hex + 87, "25 26 27 ") == 0);
 }
 
+static bool led_on;
+static unsigned led_edges;
+static void record_led(bool on) {
+    assert(led_on != on);
+    led_on = on;
+    ++led_edges;
+}
+
+static void test_status_led(void) {
+    wspr_led_state_t led = {0};
+    wspr_update_led(&led, false, false, 0, record_led);
+    wspr_update_led(&led, false, false, 3999999, record_led);
+    assert(!led_on && led_edges == 0);
+    wspr_update_led(&led, false, false, 4000000, record_led);
+    assert(led_on && led_edges == 1);
+    wspr_update_led(&led, false, false, 4049999, record_led);
+    assert(led_on && led_edges == 1);
+    wspr_update_led(&led, false, false, 4050000, record_led);
+    assert(!led_on && led_edges == 2);
+    wspr_update_led(&led, false, false, 8000000, record_led);
+    assert(led_on && led_edges == 3);
+    // A mode change ends an active pulse and starts a fresh interval.
+    wspr_update_led(&led, true, false, 8010000, record_led);
+    assert(!led_on && led_edges == 4);
+    wspr_update_led(&led, true, false, 16009999, record_led);
+    assert(!led_on);
+    wspr_update_led(&led, true, false, 16010000, record_led);
+    assert(led_on && led_edges == 5);
+    wspr_update_led(&led, true, true, 16020000, record_led);
+    assert(!led_on && led_edges == 6);
+    // Remain dark throughout RF, regardless of GPS status or elapsed time.
+    wspr_update_led(&led, false, true, 31019999, record_led);
+    assert(!led_on);
+    wspr_update_led(&led, false, true, 31020000, record_led);
+    assert(!led_on && led_edges == 6);
+    wspr_update_led(&led, false, true, 31070000, record_led);
+    assert(!led_on && led_edges == 6);
+    // Returning to no-fix idle restores four seconds, with no catch-up pulses.
+    wspr_update_led(&led, false, false, 32000000, record_led);
+    wspr_update_led(&led, false, false, 35999999, record_led);
+    assert(!led_on && led_edges == 6);
+    wspr_update_led(&led, false, false, 36000000, record_led);
+    assert(led_on && led_edges == 7);
+    wspr_update_led(&led, false, false, 100000000, record_led);
+    assert(!led_on && led_edges == 8);
+    wspr_update_led(&led, false, false, 100000001, NULL);
+    assert(!led_on && led_edges == 8);
+}
+
 int main(void) {
     wspr_temperature_init();
     assert(test_adc_initialized && test_temp_enabled);
@@ -350,6 +399,7 @@ int main(void) {
     test_gps_and_schedule();
     test_transmitter();
     test_transition_logs();
+    test_status_led();
     puts("WSPR regression checks passed");
     return 0;
 }

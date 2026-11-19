@@ -15,16 +15,17 @@ from wspr_decode import decode_reports, decode_telemetry, locator_to_payload
 SCRIPT = Path(__file__).resolve().parents[1] / "wspr_decode.py"
 
 
-def sequence_rows(start="2026-10-20 20:52:00"):
+def sequence_rows(start="2026-10-20 20:52:00", variant="X"):
     """The independently checked firmware Munich example, with four receivers."""
     base = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
     rows = []
     for index, (call, locator) in enumerate((
-            ("ZL3XYZ", "JN58"), ("ZL3XYF", "EC31"),
-            ("ZL3XYA", "RM93"), ("ZL3XYT", "KR45"))):
+            ("ZL3XXZ", "JN58"), ("ZL3XXF", "EC31"),
+            ("ZL3XXA", "RM93"), ("ZL3XXT", "KR45"))):
         rows.append(dict(id=str(index + 1),
                          time_utc=(base + timedelta(minutes=2 * index)).strftime("%Y-%m-%d %H:%M:%S"),
-                         band="14", tx_sign=call, tx_loc=locator, rx_sign=f"RX{index}"))
+                         band="14", tx_sign=call.replace("ZL3XX", f"ZL3X{variant}"),
+                         tx_loc=locator, rx_sign=f"RX{index}"))
     return rows
 
 
@@ -148,11 +149,45 @@ class CsvDecoderTests(unittest.TestCase):
         self.assertEqual(message["time_utc"], "2026-10-20 20:52:00")
         self.assertEqual(message["last_report_time_utc"], "2026-10-20 20:58:00")
         self.assertEqual(message["status"], "complete")
+        self.assertEqual(message["variant"], "X")
         self.assertEqual(message["position_precision"], "extra_fine")
         self.assertEqual(message["report_count"], 5)
         self.assertEqual(message["receiver_count"], 5)
         self.assertEqual(message["fine_reports"], 2)
         self.assertEqual(message["spot_ids"], "1;2;3;4;5")
+
+    def test_simultaneous_variants_decode_separately(self):
+        old = sequence_rows(variant="Y")
+        old[0]["tx_loc"] = "FN41"
+        # Callsigns are case insensitive in reception CSVs.
+        for row in old:
+            row["tx_sign"] = row["tx_sign"].lower()
+        messages, warnings = decode_reports(reversed(sequence_rows() + old))
+        self.assertFalse(warnings)
+        self.assertEqual([message["variant"] for message in messages], ["X", "Y"])
+        self.assertTrue(all(message["status"] == "complete" for message in messages))
+        self.assertEqual([message["coarse_grid"] for message in messages], ["JN58", "FN41"])
+        self.assertEqual([message["report_count"] for message in messages], [4, 4])
+
+    def test_variants_cannot_complete_each_others_partial_sequences(self):
+        rows = sequence_rows()[:2] + sequence_rows(variant="Y")[2:]
+        messages, warnings = decode_reports(rows)
+        self.assertFalse(warnings)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual([message["status"] for message in messages], ["incomplete"] * 2)
+        self.assertEqual(messages[0]["missing_callsigns"], "ZL3XXA;ZL3XXT")
+        self.assertEqual(messages[1]["missing_callsigns"], "ZL3XYZ;ZL3XYF")
+        self.assertIsNone(messages[0]["altitude_meters"])
+        self.assertIsNone(messages[1]["latitude"])
+
+    def test_y_conflicts_report_y_callsigns_only(self):
+        rows = sequence_rows(variant="Y")
+        rows.append(dict(rows[1], id="99", tx_loc="EC32"))
+        messages, warnings = decode_reports(rows + sequence_rows())
+        self.assertFalse(warnings)
+        self.assertEqual(messages[0]["status"], "complete")
+        self.assertEqual(messages[1]["variant"], "Y")
+        self.assertEqual(messages[1]["conflicting_callsigns"], "ZL3XYF")
 
     def test_missing_frames_are_not_borrowed_from_next_sequence(self):
         first = sequence_rows()
@@ -162,7 +197,7 @@ class CsvDecoderTests(unittest.TestCase):
         self.assertFalse(warnings)
         partial, complete = messages
         self.assertEqual(partial["status"], "incomplete")
-        self.assertEqual(partial["missing_callsigns"], "ZL3XYA;ZL3XYT")
+        self.assertEqual(partial["missing_callsigns"], "ZL3XXA;ZL3XXT")
         self.assertIsNone(partial["altitude_meters"])
         self.assertIsNone(partial["temperature_celsius"])
         self.assertEqual(partial["position_precision"], "fine")
@@ -191,7 +226,7 @@ class CsvDecoderTests(unittest.TestCase):
         rows.append(dict(rows[1], id="5", rx_sign="RX_OTHER", tx_loc="EC32"))
         message = decode_reports(rows)[0][0]
         self.assertEqual(message["status"], "conflict")
-        self.assertEqual(message["conflicting_callsigns"], "ZL3XYF")
+        self.assertEqual(message["conflicting_callsigns"], "ZL3XXF")
         self.assertEqual(message["fine_locator"], "EC31;EC32")
         self.assertIsNone(message["fine_payload"])
         self.assertEqual(message["position_precision"], "coarse")
@@ -236,6 +271,7 @@ class CsvDecoderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "wspr_20m.csv"
             rows = sequence_rows()
+            rows.extend(sequence_rows(variant="Y"))
             rows.extend(sequence_rows("2026-10-20 21:00:00")[:2])
             conflicting = sequence_rows("2026-10-20 21:08:00")
             conflicting.append(dict(conflicting[1], id="99", tx_loc="EC32"))
@@ -247,9 +283,10 @@ class CsvDecoderTests(unittest.TestCase):
             original = source.read_bytes()
             result = subprocess.run([sys.executable, str(SCRIPT)], cwd=directory,
                                     check=True, capture_output=True, text=True)
-            self.assertIn("1 complete", result.stderr)
+            self.assertIn("2 complete", result.stderr)
             self.assertIn("Skipped 2 incomplete/conflicting", result.stderr)
             self.assertIn("Time (UTC)", result.stdout)
+            self.assertIn("Variant", result.stdout)
             self.assertIn("48.117222° N", result.stdout)
             self.assertIn("11.516667° E", result.stdout)
             self.assertIn("123 m", result.stdout)
@@ -258,8 +295,9 @@ class CsvDecoderTests(unittest.TestCase):
             self.assertNotIn("21:08:00", result.stdout)
             with (Path(directory) / "wspr_20m_decoded.csv").open(newline="") as stream:
                 records = list(csv.DictReader(stream))
-            self.assertEqual(len(records), 1)
-            self.assertEqual(set(records[0]), {"time_utc", "latitude", "longitude",
+            self.assertEqual(len(records), 2)
+            self.assertEqual([record["variant"] for record in records], ["X", "Y"])
+            self.assertEqual(set(records[0]), {"time_utc", "variant", "latitude", "longitude",
                                                "altitude_meters", "temperature_celsius"})
             self.assertEqual(records[0]["latitude"], "48.117222")
             self.assertEqual(records[0]["longitude"], "11.516667")
@@ -271,7 +309,8 @@ class CsvDecoderTests(unittest.TestCase):
                                      "--output", str(custom), "--json"],
                                     check=True, capture_output=True, text=True)
             decoded = json.loads(result.stdout)
-            self.assertEqual(len(decoded), 1)
+            self.assertEqual(len(decoded), 2)
+            self.assertEqual([message["variant"] for message in decoded], ["X", "Y"])
             self.assertEqual(set(decoded[0]), set(records[0]))
             self.assertEqual(decoded[0]["temperature_celsius"], 27)
             self.assertTrue(custom.exists())

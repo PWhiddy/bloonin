@@ -17,10 +17,6 @@
 #include "pico/cyw43_arch.h"
 #endif
 
-#ifndef LED_DELAY_MS
-#define LED_DELAY_MS 50
-#endif
-
 // Perform initialisation
 int pico_led_init(void) {
 #if defined(PICO_DEFAULT_LED_PIN)
@@ -32,6 +28,8 @@ int pico_led_init(void) {
 #elif defined(CYW43_WL_GPIO_LED_PIN)
     // For Pico W devices we need to initialise the driver etc
     return cyw43_arch_init();
+#else
+    return PICO_OK;
 #endif
 }
 
@@ -50,10 +48,16 @@ int main() {
     /* 54mhz clock for less power usage (>10% more than 48mhz usb clock min) */
     set_sys_clock_khz(54000u, true);
     stdio_init_all();
+    int led_rc = pico_led_init();
+    if (led_rc != PICO_OK) {
+        printf("LED initialization failed (%d); status LED disabled\n", led_rc);
+    } else {
+        pico_set_led(false);
+    }
     /* This loop does not return.  Keeping it first protects WSPR symbol timing
-     * from the scan, sweep, GPS monitor, camera demo, and LED code below. */
+     * from the scan, sweep, GPS monitor and camera demo below. */
 
-    wspr_run_beacon();
+    wspr_run_beacon(led_rc == PICO_OK ? pico_set_led : NULL);
 
     si5351a_i2c_scan_default_bus();
 
@@ -86,12 +90,4 @@ int main() {
 
     ov5640_demo_run();
 
-    int rc = pico_led_init();
-    hard_assert(rc == PICO_OK);
-    while (true) {
-        pico_set_led(true);
-        sleep_ms(LED_DELAY_MS);
-        pico_set_led(false);
-        sleep_ms(LED_DELAY_MS);
-    }
 }

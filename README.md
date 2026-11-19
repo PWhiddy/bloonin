@@ -46,7 +46,7 @@ The callsign identifies the payload stored in the 15-bit locator field:
 | `WSPR_CALLSIGN` | Standard four-character Maidenhead grid |
 | `WSPR_CALLSIGN_FINE` | `longitude_index * 180 + latitude_index` (0–32399) |
 | `WSPR_CALLSIGN_ALT` | GGA altitude in meters, rounded to nearest meter and clamped to 0–32767 |
-| `WSPR_CALLSIGN_TEMP` (`ZL3XYT`) | `((extra_longitude_index * 15 + extra_latitude_index) << 7) \| temperature_code` (0–28799) |
+| `WSPR_CALLSIGN_TEMP` (`ZL3XXT`) | `((extra_longitude_index * 15 + extra_latitude_index) << 7) \| temperature_code` (0–28799) |
 
 Fine indices run from 0 to 179 eastward and northward from the southwest corner
 of the **frozen coarse cell**, dividing its 2° longitude by 1° latitude extent
@@ -89,7 +89,7 @@ cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
   -Itests/stubs -I. tests/wspr_test.c -o /private/tmp/bloonin-wspr-tests
 /private/tmp/bloonin-wspr-tests
 python3 tests/run_simulation.py
-python3 -m unittest discover -s tests -p 'test_wspr_decode.py'
+python3 -m unittest discover -s tests -p 'test_wspr_*.py'
 ```
 
 ### Collect and decode WSPR reports
@@ -99,12 +99,21 @@ python3 wspr_collect.py  # Backfill history and poll every 120 seconds
 python3 wspr_decode.py   # Run in another terminal to decode the current CSV
 ```
 
-The collector saves 20 m reports for `ZL3XYZ`, `ZL3XYF`, `ZL3XYA`, and `ZL3XYT`
+The collector saves 20 m reports for both callsign families: X (`ZL3XXZ`,
+`ZL3XXF`, `ZL3XXA`, `ZL3XXT`) and Y (`ZL3XYZ`, `ZL3XYF`, `ZL3XYA`, `ZL3XYT`)
 from [WSPR Live](https://wspr.live/) to `wspr_20m.csv`. Keep its `.sqlite3`
 sidecar; stop with Ctrl-C and rerun to resume. Use `--since YYYY-MM-DD` to limit
 initial history or `--once` to update and exit.
+When upgrading an existing sidecar from a single callsign family, its first run
+automatically restarts historical backfill for both families without discarding
+reports or live progress. This adds API queries until that backfill completes.
 
 The decoder prints **complete, unambiguous messages only** and writes
-`wspr_20m_decoded.csv`: UTC time, GPS coordinates in decimal degrees, altitude
-in meters, and Pico chip temperature in °C. Rerun it to refresh the output.
+`wspr_20m_decoded.csv`: UTC time, `variant` (`X` or `Y`), GPS coordinates in
+decimal degrees, altitude in meters, and Pico chip temperature in °C. Table and
+JSON output also identify the variant. Sequences are grouped by variant and
+start time, so X and Y frames never fill each other's gaps or create conflicts
+between families. The collected CSV keeps the raw callsigns and its existing
+columns. Positional locator/payload decoding has no callsign from which to infer
+a variant. Rerun the decoder to refresh its output.
 Use `--help` on either script for file paths and other options.

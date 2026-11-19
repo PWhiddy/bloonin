@@ -12,6 +12,40 @@
 #define WSPR_GPS_PROGRESS_LOG_US 10000000ll
 
 typedef struct {
+    int64_t interval_us;
+    absolute_time_t next_blink, off_at;
+    bool on;
+} wspr_led_state_t;
+
+/* Poll only while idle; suspend before RF starts. Never sleep here. */
+static inline void wspr_update_led(
+    wspr_led_state_t *led, bool gps_fix, bool transmitting, absolute_time_t now,
+    void (*set_led)(bool)
+) {
+    if (!set_led) return;
+    if (transmitting) {
+        if (led->on) set_led(false);
+        *led = (wspr_led_state_t){0};
+        return;
+    }
+    int64_t interval = gps_fix ? 8000000ll : 4000000ll;
+    if (led->interval_us != interval) {
+        if (led->on) set_led(false);
+        led->on = false;
+        led->interval_us = interval;
+        led->next_blink = delayed_by_us(now, interval);
+    } else if (led->on && absolute_time_diff_us(led->off_at, now) >= 0ll) {
+        set_led(false);
+        led->on = false;
+    } else if (!led->on && absolute_time_diff_us(led->next_blink, now) >= 0ll) {
+        set_led(true);
+        led->on = true;
+        led->off_at = delayed_by_us(now, 50000ll);
+        led->next_blink = delayed_by_us(now, interval);
+    }
+}
+
+typedef struct {
     bool initialized;
     int uart_state;
     bool fix;
@@ -223,10 +257,14 @@ static inline bool wspr_beacon_message(
     return true;
 }
 
-static inline void wspr_stop_on_error(si5351a_i2c_t *clock, const char *reason) {
+static inline void wspr_stop_on_error(
+    si5351a_i2c_t *clock, const char *reason, void (*set_led)(bool)
+) {
     si5351a_error_t error = clock->last_error;
     uint8_t reg = clock->last_reg;
     bool disabled = si5351a_i2c_set_outputs_enabled(clock, false);
+    /* If RF could not be disabled, leave its already-suspended LED alone. */
+    if (disabled && set_led) set_led(false);
     bool first = true;
     bool was_connected = false;
     while (true) {
@@ -246,7 +284,9 @@ static inline void wspr_stop_on_error(si5351a_i2c_t *clock, const char *reason) 
 }
 
 /* This loop owns the application while the beacon is enabled. */
-static inline void wspr_run_beacon(void) {
+static inline void wspr_run_beacon(void (*set_led)(bool)) {
+    wspr_led_state_t led = {0};
+    wspr_update_led(&led, false, false, get_absolute_time(), set_led);
     mutex_init(&wspr_gps_mutex);
     multicore_launch_core1(wspr_monitor_gps);
     wspr_temperature_init();
@@ -254,7 +294,7 @@ static inline void wspr_run_beacon(void) {
     si5351a_i2c_t clock;
     if (!si5351a_i2c_prepare_output_hz(&clock, WSPR_BASE_HZ) ||
         !si5351a_i2c_set_outputs_enabled(&clock, false)) {
-        wspr_stop_on_error(&clock, "initialization failed");
+        wspr_stop_on_error(&clock, "initialization failed", set_led);
     }
 
     wspr_beacon_schedule_t schedule = {.grid = WSPR_FALLBACK_GRID};
@@ -263,7 +303,7 @@ static inline void wspr_run_beacon(void) {
     uint16_t last_payload = 0u;
     wspr_grid_payload(schedule.grid, &last_payload);
     if (!wspr_prepare(&clock, &tx, WSPR_CALLSIGN, schedule.grid, WSPR_POWER_DBM)) {
-        wspr_stop_on_error(&clock, "preparation failed; check station fields and Si5351A");
+        wspr_stop_on_error(&clock, "preparation failed; check station fields and Si5351A", set_led);
     }
     printf("WSPR RF STATE: NOT TRANSMITTING; base=%lu Hz callsign=%s power=%u dBm\n",
            (unsigned long)WSPR_BASE_HZ, WSPR_CALLSIGN, (unsigned)WSPR_POWER_DBM);
@@ -307,7 +347,7 @@ static inline void wspr_run_beacon(void) {
         if (tx.active) {
             if (!wspr_poll_transmitter(&clock, &tx)) {
                 /* Stop scheduling after an I2C error: RF state is uncertain. */
-                wspr_stop_on_error(&clock, "transmission failed");
+                wspr_stop_on_error(&clock, "transmission failed", set_led);
             }
             if (!tx.active) {
                 printf("WSPR RF STATE: NOT TRANSMITTING (frame complete)\n");
@@ -349,11 +389,12 @@ static inline void wspr_run_beacon(void) {
                     continue;
                 }
                 if (!wspr_prepare_payload(&clock, &tx, callsign, payload, WSPR_POWER_DBM)) {
-                    wspr_stop_on_error(&clock, "preparation failed");
+                    wspr_stop_on_error(&clock, "preparation failed", set_led);
                 }
+                wspr_update_led(&led, false, true, get_absolute_time(), set_led);
                 now = get_absolute_time();
                 if (!wspr_start(&clock, &tx, now)) {
-                    wspr_stop_on_error(&clock, "start failed");
+                    wspr_stop_on_error(&clock, "start failed", set_led);
                 }
                 last_callsign = callsign;
                 last_payload = payload;
@@ -362,6 +403,10 @@ static inline void wspr_run_beacon(void) {
                        (unsigned)payload, (unsigned)WSPR_POWER_DBM);
                 wspr_beacon_did_start(&schedule, now);
             }
+        }
+        if (!tx.active) {
+            absolute_time_t led_now = get_absolute_time();
+            wspr_update_led(&led, wspr_gps_fix_fresh(&gps, led_now), false, led_now, set_led);
         }
         sleep_us(100u);
     }

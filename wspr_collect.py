@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Maintain a CSV of 20 m reception reports for the four Bloonin transmitters.
+"""Maintain a CSV of 20 m reception reports for Bloonin X and Y variants.
 
 Python 3.9+; standard library only. Data/API documentation: https://wspr.live/
 Run without arguments to backfill all available history and poll indefinitely.
@@ -22,8 +22,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from wspr_callsigns import CALLSIGNS
 
-CALLSIGNS = ("ZL3XYZ", "ZL3XYF", "ZL3XYA", "ZL3XYT")
 ENDPOINT = "https://db1.wspr.live/"
 EARLIEST = "2008-03-01"
 BAND = 14  # WSPR Live uses MHz band identifiers: 14 means 20 metres.
@@ -142,8 +142,16 @@ class Store:
                     raise ValueError(f"--since must be on/after {EARLIEST} and before now")
                 boundary = max(since, now - 2 * DAY)
                 self.state = {"since": since, "live_through": boundary,
-                              "history_before": boundary, "rescan_at": 0}
+                              "history_before": boundary, "rescan_at": 0,
+                              "callsigns": list(CALLSIGNS)}
                 self.save()
+            if set(self.state.get("callsigns", ())) != set(CALLSIGNS):
+                # Old checkpoints covered only one family. Preserve reports and
+                # live progress, but revisit history for the expanded query.
+                self.state.update(callsigns=list(CALLSIGNS),
+                                  history_before=self.state["live_through"], rescan_at=0)
+                self.save()
+                LOG.info("Callsign selection changed; restarting historical scan for X and Y variants")
             # Recover a missing/stale CSV after interruption, even if no new spots arrive.
             self.export()
         except BaseException:
