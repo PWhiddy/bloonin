@@ -205,10 +205,7 @@ def check_report(report):
             error = abs(at - frame["start_us"] - index * 8192000000 // 12000)
             max_boundary_error = max(max_boundary_error, error)
             assert error <= 600, f"symbol {index} missed deadline by {error} us"
-        if name == "i2c_disable_failure":
-            assert frame["end_us"] == 0 and report["rf_enabled"]
-        else:
-            assert abs(frame["end_us"] - frame["start_us"] - 110_592_000) <= 600
+        assert abs(frame["end_us"] - frame["start_us"] - 110_592_000) <= 600
     # One discarded ADC read plus 16 averaged samples per new GPS snapshot.
     if not name.startswith("i2c_"):
         snapshots = 0 if name in {"serial_only", "led_on_at_start"} else sum(
@@ -216,17 +213,17 @@ def check_report(report):
             (i - (1 if name == "gps_during_serial_frame" else 0)) % 4 == 0
             for i in range(len(frames)))
         assert report["adc_reads"] == snapshots * 17, report["adc_reads"]
+    assert not report["rf_enabled"], "RF left enabled"
     if name != "i2c_disable_failure":
-        assert not report["rf_enabled"], "RF left enabled"
         assert report["output_disable_mask"] == 0xFF, "idle state did not disable all outputs"
     else:
         assert report["output_disable_mask"] == 0xFC
     if name.startswith("i2c_"):
         assert report["fault_count"] > 0
-        assert any("beacon halted" in text for text in texts)
-        assert any(("RF STATE: UNKNOWN" if name == "i2c_disable_failure" else "RF STATE: NOT TRANSMITTING")
-                   in text for text in texts)
+        assert not report["radio_powered"]
+        assert any("radio power switched off; beacon halted" in text for text in texts)
     else:
+        assert report["radio_powered"]
         assert not any("WSPR ERROR" in text for text in texts), texts
     if name in {"gps_no_usb", "no_inputs", "long_holdover", "usb_backpressure"}:
         assert not any(log["delivered"] for log in logs)

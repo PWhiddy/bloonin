@@ -53,7 +53,7 @@ static struct {
     input_byte_t uart[MAX_BYTES], serial[128];
     size_t uart_size, uart_read, uart_overruns, serial_size, serial_read;
     uint8_t registers[256];
-    bool rf;
+    bool rf, radio_powered;
     uint8_t outputs_ever_enabled;
     uint8_t unused_outputs_ever_powered;
     unsigned fault_count;
@@ -183,7 +183,9 @@ void gpio_init(uint pin) {
     if (pin == C90770_POWER_ENABLE_GPIO) sim.gps_power_initialized = true;
 }
 void gpio_disable_pulls(uint pin) {
-    if (pin == C90770_RESET_GPIO) {
+    if (pin == SI5351A_I2C_SDA_GPIO || pin == SI5351A_I2C_SCL_GPIO) {
+        assert(sim.radio_powered);
+    } else if (pin == C90770_RESET_GPIO) {
         assert(sim.gps_reset_initialized);
         sim.gps_reset_released = true;
     } else {
@@ -191,7 +193,13 @@ void gpio_disable_pulls(uint pin) {
     }
 }
 void gpio_put(uint pin, bool value) {
-    if (pin == C90770_POWER_ENABLE_GPIO) {
+    if (pin == SI5351A_POWER_ENABLE_GPIO) {
+        sim.radio_powered = !value;
+        if (value && sim.rf) {
+            sim.frames[sim.frame_count - 1].end = now;
+            sim.rf = false;
+        }
+    } else if (pin == C90770_POWER_ENABLE_GPIO) {
         assert(sim.gps_power_initialized && !value);
         sim.gps_power_low_preloaded = true;
     }
@@ -266,7 +274,7 @@ static void record_tone(void) {
 }
 int i2c_write_blocking(i2c_inst_t *i, uint8_t addr, const uint8_t *data, size_t n, bool nostop) {
     (void)nostop;
-    assert(core == 0 && i == i2c0 && addr == 0x60 && n > 0);
+    assert(sim.radio_powered && core == 0 && i == i2c0 && addr == 0x60 && n > 0);
     /* Account for address/data/ACK wire time at 400 kHz. */
     sleep_us(((n + 1u) * 9u * SECOND + 399999u) / 400000u);
     bool fail = false;
@@ -320,7 +328,7 @@ int i2c_write_blocking(i2c_inst_t *i, uint8_t addr, const uint8_t *data, size_t 
 }
 int i2c_read_blocking(i2c_inst_t *i, uint8_t addr, uint8_t *data, size_t n, bool nostop) {
     (void)nostop;
-    assert(i == i2c0 && addr == 0x60);
+    assert(sim.radio_powered && i == i2c0 && addr == 0x60);
     sleep_us(((n + 1u) * 9u * SECOND + 399999u) / 400000u);
     memset(data, 0, n);
     return (int)n;
@@ -471,12 +479,13 @@ static void json_string(const char *s) {
 static void report(void) {
     printf("{\"scenario\":\"%s\",\"duration_us\":%lld,\"uart_bytes\":%zu,\"uart_read\":%zu,"
            "\"uart_overruns\":%zu,\"serial_read\":%zu,\"fault_count\":%u,\"rf_enabled\":%s,"
-           "\"dropped_logs\":%u,\"gps_revision\":%u,\"checksum_failures\":%u,"
+           "\"radio_powered\":%s,\"dropped_logs\":%u,\"gps_revision\":%u,\"checksum_failures\":%u,"
            "\"outputs_ever_enabled\":%u,\"unused_outputs_ever_powered\":%u,"
            "\"output_disable_mask\":%u,\"callsign\":\"%s\",\"fallback_grid\":\"%s\","
            "\"callsign_fine\":\"%s\",\"callsign_alt\":\"%s\",\"callsign_temp\":\"%s\",\"adc_reads\":%u,\"power_dbm\":%u,\"frames\":[",
            sim.name, (long long)sim.duration, sim.uart_size, sim.uart_read, sim.uart_overruns,
-           sim.serial_read, sim.fault_count, sim.rf ? "true" : "false", sim.dropped,
+           sim.serial_read, sim.fault_count, sim.rf ? "true" : "false",
+           sim.radio_powered ? "true" : "false", sim.dropped,
            wspr_gps_revision, wspr_gps_shared.checksum_failures,
            sim.outputs_ever_enabled, sim.unused_outputs_ever_powered, sim.registers[3],
            WSPR_CALLSIGN, WSPR_FALLBACK_GRID, WSPR_CALLSIGN_FINE, WSPR_CALLSIGN_ALT, WSPR_CALLSIGN_TEMP, sim.adc_reads, (unsigned)WSPR_POWER_DBM);

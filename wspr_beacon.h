@@ -262,17 +262,18 @@ static inline void wspr_stop_on_error(
 ) {
     si5351a_error_t error = clock->last_error;
     uint8_t reg = clock->last_reg;
-    bool disabled = si5351a_i2c_set_outputs_enabled(clock, false);
-    /* If RF could not be disabled, leave its already-suspended LED alone. */
-    if (disabled && set_led) set_led(false);
+    /* This is a terminal fault. The radio load switch works independently of I2C. */
+    gpio_disable_pulls(clock->sda_gpio);
+    gpio_disable_pulls(clock->scl_gpio);
+    gpio_put(clock->power_enable_gpio, true);
+    if (set_led) set_led(false);
     bool first = true;
     bool was_connected = false;
     while (true) {
         bool connected = stdio_usb_connected();
         if (first || (connected && !was_connected)) {
-            printf("WSPR ERROR: %s; Si5351A=%s (reg 0x%02x); RF STATE: %s; beacon halted\n",
-                   reason, si5351a_i2c_error_string(error), reg,
-                   disabled ? "NOT TRANSMITTING" : "UNKNOWN");
+            printf("WSPR ERROR: %s; Si5351A=%s (reg 0x%02x); radio power switched off; beacon halted\n",
+                   reason, si5351a_i2c_error_string(error), reg);
             mutex_enter_blocking(&wspr_gps_mutex);
             wspr_gps_log_requested = true;
             mutex_exit(&wspr_gps_mutex);
